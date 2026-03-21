@@ -22,25 +22,67 @@ shared_state = {
     "final_answer": None
 }
 
-# ========== 初始化 LLM 和检索器 ==========
-embeddings = DashScopeEmbeddings(model="text-embedding-v4", dashscope_api_key=api_key)
-vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-llm = ChatTongyi(model="qwen-plus", temperature=0)
+# ========== 延迟初始化资源 ==========
+_embeddings = None
+_vectorstore = None
+_retriever = None
+_llm = None
+_qa_chain = None
 
-# 检索问答链
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",
-    retriever=retriever,
-    return_source_documents=True
-)
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = DashScopeEmbeddings(model="text-embedding-v4", dashscope_api_key=api_key)
+    return _embeddings
+
+
+def get_vectorstore():
+    global _vectorstore
+    if _vectorstore is None:
+        # 检查是否在 CI 环境中，如果是则返回 None 或 mock
+        if os.getenv("CI"):
+            return None
+        embeddings = get_embeddings()
+        _vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+    return _vectorstore
+
+
+def get_retriever():
+    global _retriever
+    if _retriever is None:
+        vectorstore = get_vectorstore()
+        if vectorstore is not None:
+            _retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    return _retriever
+
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        _llm = ChatTongyi(model="qwen-plus", temperature=0)
+    return _llm
+
+
+def get_qa_chain():
+    global _qa_chain
+    if _qa_chain is None and get_retriever() is not None and get_llm() is not None:
+        _qa_chain = RetrievalQA.from_chain_type(
+            llm=get_llm(),
+            chain_type="stuff",
+            retriever=get_retriever(),
+            return_source_documents=True
+        )
+    return _qa_chain
 
 
 # ========== 工具定义（企业业务场景） ==========
 @tool
 def knowledge_search(query: str) -> str:
     """从企业知识库中检索信息，返回答案。适用于产品使用、技术支持、销售政策等问题。"""
+    qa_chain = get_qa_chain()
+    if qa_chain is None:
+        return "知识库服务不可用，请稍后再试。"
     result = qa_chain.invoke({"query": query})
     return result["result"]
 
@@ -48,7 +90,6 @@ def knowledge_search(query: str) -> str:
 @tool
 def query_ticket_status(ticket_id: str) -> str:
     """模拟查询工单状态。工单号格式为 TK-xxxxxx。"""
-    # 模拟数据
     mock_status = {
         "TK-123456": "您的工单 TK-123456 已受理，正在处理中，预计48小时内完成。",
         "TK-789012": "工单 TK-789012 已处理完毕，请登录系统查看结果。",
@@ -90,12 +131,11 @@ def planning_agent(query: str) -> list:
 用户问题：{query}
 任务列表（JSON）：
 """)
-    chain = prompt | llm
+    chain = prompt | get_llm()
     response = chain.invoke({"query": query}).content
     try:
         tasks = json.loads(response)
     except:
-        # 如果模型输出不是纯 JSON，尝试提取
         match = re.search(r'\[.*\]', response, re.DOTALL)
         tasks = json.loads(match.group()) if match else []
     return tasks
@@ -121,22 +161,13 @@ def execution_agent(tasks: list) -> dict:
     return results
 
 
-# ========== 验证 Agent（简化版，基于关键词） ==========
+# ========== 验证 Agent ==========
 def validation_agent(user_query: str, final_answer: str) -> str:
-    """
-    对执行结果进行验证。
-    - 如果答案包含工单信息、日期信息或转人工提示，直接返回（信任确定性工具）
-    - 如果答案太短或包含“无法确定”，返回通用拒答
-    - 否则原样返回（假设是 RAG 结果，需要进一步验证可在此扩展）
-    """
-    # 定义确定性结果的关键词
     trust_keywords = ["工单", "受理", "处理中", "已完成", "今天", "年-月-日", "转人工"]
     if any(kw in final_answer for kw in trust_keywords):
         return final_answer
-    # 如果答案过短或明显表示失败
     if len(final_answer) < 5 or "无法确定" in final_answer:
         return "抱歉，我无法确定准确答案。建议您转人工客服。"
-    # 对于其他情况（如 RAG 结果），直接返回（可后续加强验证）
     return final_answer
 
 
@@ -146,11 +177,16 @@ def run_multi_agent(user_query: str) -> dict:
 
     tasks = planning_agent(user_query)
     shared_state["plan"] = tasks
+    print(f"[规划] 任务清单: {tasks}")
+
     exec_results = execution_agent(tasks)
     shared_state["tool_results"] = exec_results
     preliminary = "\n".join(exec_results.values()) if exec_results else "无结果"
+    print(f"[执行] 合并答案: {preliminary}")
+
     final = validation_agent(user_query, preliminary)
     shared_state["final_answer"] = final
+    print(f"[验证] 最终答案: {final}")
 
     return {
         "tasks": tasks,
@@ -159,6 +195,7 @@ def run_multi_agent(user_query: str) -> dict:
     }
 
 
+# ========== 入口处理（为兼容原单次调用） ==========
 if __name__ == "__main__":
     print("企业智能客服 Agent 已启动（多 Agent 模式）")
     while True:
@@ -166,4 +203,4 @@ if __name__ == "__main__":
         if q.lower() == 'quit':
             break
         ans = run_multi_agent(q)
-        print(f"助手: {ans}")
+        print(f"助手: {ans['final_answer']}")

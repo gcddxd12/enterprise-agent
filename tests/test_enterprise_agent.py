@@ -15,32 +15,31 @@ from enterprise_agent import (
 
 load_dotenv()
 
+# 判断是否在 CI 环境（GitHub Actions 会自动设置 CI=true）
+CI = os.getenv("CI") is not None
+
+@pytest.mark.skipif(CI, reason="Skipping test that requires API in CI")
 def test_knowledge_search():
-    """测试知识库检索返回非空字符串"""
     result = knowledge_search.run("如何重置密码")
     assert isinstance(result, str)
     assert len(result) > 10
     assert "密码" in result or "重置" in result
 
 def test_ticket_query_found():
-    """测试工单查询（存在的工单）"""
     result = query_ticket_status.run("TK-123456")
     assert "处理中" in result or "受理" in result
     assert "TK-123456" in result
 
 def test_ticket_query_not_found():
-    """测试工单查询（不存在的工单）"""
     result = query_ticket_status.run("TK-999999")
     assert "未找到" in result
 
 def test_date_query():
-    """测试日期工具返回格式正确的日期"""
     result = get_current_date.run("")
     import re
     assert re.match(r'\d{4}-\d{2}-\d{2}', result) is not None
 
 def test_planning_agent():
-    """测试规划 Agent 能正确拆解任务"""
     tasks = planning_agent("查询工单 TK-123456")
     assert isinstance(tasks, list)
     assert any("ticket_query" in task for task in tasks)
@@ -50,23 +49,18 @@ def test_planning_agent():
     assert any("knowledge_search" in task for task in tasks)
 
 def test_execution_agent():
-    """测试执行 Agent 能正确执行任务"""
     tasks = ["ticket_query: TK-123456"]
     results = execution_agent(tasks)
     assert "ticket_query: TK-123456" in results
     assert "处理中" in results["ticket_query: TK-123456"]
 
 def test_validation_agent():
-    """测试验证 Agent 正确放行确定性结果"""
-    # 工单结果
     answer = "您的工单 TK-123456 已受理，正在处理中"
     validated = validation_agent("查询工单", answer)
     assert "受理" in validated
-    # 日期结果
     answer = "2025-03-21"
     validated = validation_agent("今天几号", answer)
     assert "2025-03-21" in validated
-    # 无效答案
     answer = "不知道"
     validated = validation_agent("测试", answer)
     assert "无法确定" in validated
