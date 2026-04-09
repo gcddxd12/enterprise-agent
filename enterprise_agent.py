@@ -3,7 +3,7 @@ import json
 import re
 from datetime import date
 from dotenv import load_dotenv
-from langchain.tools import tool, Tool
+from langchain_core.tools import tool, Tool
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.chains import RetrievalQA
