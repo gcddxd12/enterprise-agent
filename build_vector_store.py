@@ -1,6 +1,6 @@
 """
 中国移动智能客服 - 向量知识库增量构建脚本
-对新增 300 条 CMCC 数据做切分+向量化，增量添加到现有 ChromaDB
+对新增 CMCC 数据（txt/json/pdf）做切分+向量化，增量添加到现有 ChromaDB
 旧数据不动、不删、不重建
 """
 import os
@@ -20,44 +20,122 @@ embeddings = DashScopeEmbeddings(
     dashscope_api_key=api_key
 )
 
-# ========== 加载新增 CMCC 数据 ==========
+# ========== 加载数据源 ==========
+all_documents = []
+
+# ---------- 数据源1: txt/json 知识库 ----------
 labeled_path = os.path.join("knowledge_data", "cmcc_knowledge_labeled.json")
 raw_path = os.path.join("data", "cmcc_300_knowledge.txt")
 
 if os.path.exists(labeled_path):
     with open(labeled_path, "r", encoding="utf-8") as f:
         items = json.load(f)
-    print(f"从 {labeled_path} 加载 {len(items)} 条已分类知识")
+    print(f"[txt] 从 {labeled_path} 加载 {len(items)} 条已分类知识")
 else:
     with open(raw_path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
     items = [{"id": i + 1, "category": "综合业务", "content": line} for i, line in enumerate(lines)]
-    print(f"从 {raw_path} 加载 {len(items)} 条知识（无分类标签）")
+    print(f"[txt] 从 {raw_path} 加载 {len(items)} 条知识（无分类标签）")
 
-# ========== 拼接为全文后，用与旧数据相同的规则切分 ==========
-# 每条内容前加分类标签，提高语义匹配度
-full_text_parts = []
+txt_text_parts = []
 for item in items:
-    full_text_parts.append(f"[{item['category']}] {item['content']}。")
+    txt_text_parts.append(f"[{item['category']}] {item['content']}。")
+txt_full = "\n".join(txt_text_parts)
 
-full_text = "\n".join(full_text_parts)
+# ---------- 数据源2: PDF 知识库 ----------
+pdf_path = os.path.join("data", "中国移动智能客服+营业厅300条超长完整版专业RAG知识库（适配AI客服问答专用）.pdf")
+pdf_extracted_path = os.path.join("data", "pdf_extracted.txt")
 
-# 与旧数据完全一致的切分规则
+pdf_text = ""
+if os.path.exists(pdf_path):
+    try:
+        from pdfplumber import open as pdf_open
+        print(f"[pdf] 正在解析 PDF: {pdf_path}")
+        pdf = pdf_open(pdf_path)
+        page_texts = []
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                page_texts.append(t)
+        pdf.close()
+        pdf_text = "\n".join(page_texts)
+        # 缓存提取结果，避免重复解析
+        with open(pdf_extracted_path, "w", encoding="utf-8") as f:
+            f.write(pdf_text)
+        print(f"[pdf] 提取完成: {len(pdf.pages)} 页, {len(pdf_text)} 字符")
+    except Exception as e:
+        print(f"[pdf] pdfplumber 解析失败: {e}，尝试 pypdf...")
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(pdf_path)
+            page_texts = []
+            for page in reader.pages:
+                t = page.extract_text()
+                if t:
+                    page_texts.append(t)
+            pdf_text = "\n".join(page_texts)
+            with open(pdf_extracted_path, "w", encoding="utf-8") as f:
+                f.write(pdf_text)
+            print(f"[pdf] 提取完成(pypdf): {len(reader.pages)} 页, {len(pdf_text)} 字符")
+        except Exception as e2:
+            print(f"[pdf] pypdf 也失败: {e2}，跳过 PDF")
+elif os.path.exists(pdf_extracted_path):
+    with open(pdf_extracted_path, "r", encoding="utf-8") as f:
+        pdf_text = f.read()
+    print(f"[pdf] 从缓存加载: {len(pdf_text)} 字符")
+
+# ---------- 合并所有文本 + 统一切分 ----------
+# PDF 内容按编号条目切分为独立段落（每条是一个完整知识点）
+pdf_chunks = []
+if pdf_text:
+    import re
+    # 去掉标题行
+    pdf_body = pdf_text
+    # 按 "换行+数字+." 拆分（PDF中条目格式: \n1.xxx \n2.xxx）
+    entries = re.split(r'\n(?=\d{1,3}\.)', pdf_body)
+    for entry in entries:
+        # 清理条目：去掉编号、控制字符（如 \x01）
+        entry = re.sub(r'^\d{1,3}\.\s*', '', entry.strip())
+        entry = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f]', '', entry)
+        # 过滤标题行（含"知识库""超长完整版"等字样）和太短的碎片
+        is_title = any(kw in entry for kw in ["完整版专业RAG", "超长完整版", "知识库（适配"])
+        if entry and len(entry) > 80 and not is_title:
+            pdf_chunks.append(entry)
+    print(f"[pdf] 按条目切分: {len(pdf_chunks)} 个知识条目")
+
+# 合并 txt 文本和 PDF 条目
+if pdf_chunks:
+    full_text = txt_full  # txt 保持原样走统一切分
+else:
+    full_text = txt_full
+
+# txt 部分用原规则切分
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=500,
     chunk_overlap=50,
     separators=["\n\n", "\n", "。", "，", " ", ""]
 )
-chunks = text_splitter.split_text(full_text)
-print(f"切分完成: {len(items)} 条原始数据 → {len(chunks)} 个 chunk")
+txt_chunks = text_splitter.split_text(full_text)
+print(f"[txt] 切分: {len(txt_chunks)} 个 chunk")
+
+# PDF 条目太长的也切一下
+all_chunks = txt_chunks.copy()
+for entry in pdf_chunks:
+    if len(entry) <= 600:
+        all_chunks.append(entry)
+    else:
+        sub_chunks = text_splitter.split_text(entry)
+        all_chunks.extend(sub_chunks)
+
+print(f"总计: {len(all_chunks)} 个 chunk (txt: {len(txt_chunks)}, pdf: {len(all_chunks) - len(txt_chunks)})")
 
 # ========== 构建 Document ==========
 documents = [
     Document(
         page_content=chunk,
-        metadata={"source": "cmcc_300_knowledge"}
+        metadata={"source": "cmcc_combined_knowledge"}
     )
-    for chunk in chunks
+    for chunk in all_chunks
 ]
 
 # ========== 增量添加到现有向量库（不删旧数据） ==========
@@ -100,12 +178,14 @@ print("\n=== 检索验证 ===")
 test_queries = [
     "5G套餐有什么特点",
     "如何保障网络安全",
-    "物联网平台支持哪些设备",
-    "算力网络是什么",
-    "如何重置密码",  # 旧数据
+    "异地补卡怎么办理",
+    "话费余额包含哪些",
+    "定向流量和通用流量的区别",
+    "营业厅能办哪些高风险业务",
 ]
 for q in test_queries:
     results = vectorstore.similarity_search(q, k=2)
     print(f"\n查询: {q}")
     for r in results:
-        print(f"  [{r.metadata.get('source', 'old_kb')}] {r.page_content[:80]}...")
+        preview = r.page_content[:80].replace("\n", " ")
+        print(f"  [{r.metadata.get('source', 'old_kb')}] {preview}...")
