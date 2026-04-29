@@ -3,10 +3,7 @@
 Mock 外部依赖（LLM、Embedding），在 CI 中安全执行。
 """
 
-import sys
-import os
 from datetime import date
-from unittest.mock import patch, MagicMock
 
 
 class TestMemoryManager:

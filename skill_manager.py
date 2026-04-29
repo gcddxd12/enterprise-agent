@@ -9,7 +9,7 @@ preprocess_node自动匹配 + use_skill工具供LLM主动加载。
 import os
 import glob
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional
 
 

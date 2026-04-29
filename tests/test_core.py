@@ -3,7 +3,6 @@
 不依赖外部 API 即可运行的测试，CI 中安全执行。
 """
 
-import sys
 import os
 
 

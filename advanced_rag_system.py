@@ -23,7 +23,7 @@ __all__ = [
 import os
 import json
 import hashlib
-from typing import List, Dict, Any, Tuple, Optional, Callable
+from typing import List, Dict, Any, Callable
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -33,9 +33,6 @@ try:
     # 我们将实现自己的混合检索逻辑
     from langchain_community.retrievers import BM25Retriever
     from langchain_core.documents import Document
-    from langchain_core.retrievers import BaseRetriever
-    from langchain_core.embeddings import Embeddings
-    from langchain_core.language_models import BaseLanguageModel
 
     LANGCHAIN_AVAILABLE = True
 except ImportError as e:
@@ -419,7 +416,7 @@ class QueryExpander:
             try:
                 data = json.loads(content)
                 variants = data.get("variants", [])
-            except:
+            except Exception:
                 # 如果JSON解析失败，使用简单规则
                 variants = self._extract_variants_from_text(content)
 

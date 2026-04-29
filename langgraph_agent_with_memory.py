@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import TypedDict, List, Dict, Any, Literal, Optional, Annotated
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_community.chat_models import ChatTongyi
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -26,8 +26,7 @@ from langgraph.graph.message import add_messages
 
 # 尝试导入高级RAG系统
 try:
-    from advanced_rag_system import create_advanced_rag_system, AdvancedRAGRetriever
-    from langchain_core.documents import Document
+    from advanced_rag_system import create_advanced_rag_system
     ADVANCED_RAG_AVAILABLE = True
 except ImportError as e:
     print(f"警告：高级RAG系统导入失败，将使用模拟模式: {e}")
@@ -35,9 +34,7 @@ except ImportError as e:
 
 # 尝试导入监控系统
 try:
-    from monitoring_system import get_monitoring_system, monitor_workflow, monitor_node
-    from monitoring_config import get_config_manager
-    from monitoring_config import MonitoringConfig  # 配置类
+    from monitoring_system import get_monitoring_system
     MONITORING_AVAILABLE = True
 
     # 获取监控系统实例
@@ -367,8 +364,7 @@ def knowledge_search(query: str) -> str:
                     try:
                         cache_stats = advanced_rag_retriever.cache_manager.get_stats()
                         if cache_stats['result_hits'] > 0 or cache_stats['embedding_hits'] > 0:
-                            total_hits = cache_stats['result_hits'] + cache_stats['embedding_hits']
-                            response += f"\n\n[检索共找到 {len(top_results)} 条相关信息]"
+                            response += f"\n\n[检索共找到 {len(top_results)} 条相关信息（缓存命中 {cache_stats['result_hits'] + cache_stats['embedding_hits']} 次）]"
                     except Exception:
                         pass
 
@@ -383,7 +379,7 @@ def knowledge_search(query: str) -> str:
 
                 return adapted_response
             else:
-                print(f"[WARN] 高级RAG检索到0个结果，回退到模拟模式")
+                print("[WARN] 高级RAG检索到0个结果，回退到模拟模式")
                 # 监控跟踪：RAG检索无结果
                 if MONITORING_AVAILABLE and monitoring_system:
                     try:
@@ -455,7 +451,7 @@ def escalate_to_human(query: str) -> str:
         result = repo.escalate(query, priority="normal")
         response = result.get("message", "已为您转接人工客服，请稍候。")
         return memory_manager.adapt_response(response)
-    except Exception as e:
+    except Exception:
         response = "感谢您的耐心，我已将您的问题转接给人工客服，他们将尽快与您联系（预计5分钟内）。"
         return memory_manager.adapt_response(response)
 
@@ -573,7 +569,7 @@ def agent_node(state: AgentState) -> AgentState:
     """标准 ReAct Agent 节点：LLM 自主决定工具调用，观察结果，迭代推理"""
     import time
     start_time = time.time()
-    print(f"[Agent] 开始 ReAct 推理循环")
+    print("[Agent] 开始 ReAct 推理循环")
 
     llm = get_llm()
     tools = get_tools()
@@ -771,7 +767,7 @@ def postprocess_node(state: AgentState) -> AgentState:
     import time
     start_time = time.time()
 
-    print(f"[后处理节点] 处理最终答案")
+    print("[后处理节点] 处理最终答案")
 
     memory_manager = get_memory_manager()
     final_answer = state["final_answer"] or "抱歉，处理您的问题时遇到错误，请稍后再试。"
@@ -903,7 +899,7 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
         final_state = app.invoke(initial_state, config)
 
         print(f"\n{'='*60}")
-        print(f"处理完成")
+        print("处理完成")
         print(f"{'='*60}")
     except Exception as e:
         print(f"Agent 执行失败: {e}")
@@ -1071,7 +1067,7 @@ if __name__ == "__main__":
 
         result = run_langgraph_agent_with_memory(query)
         print(f"\n助手: {result.get('final_answer', '处理失败')}")
-        print(f"\n[调试信息]")
+        print("\n[调试信息]")
         print(f"- 任务规划: {result.get('plan')}")
         print(f"- 迭代次数: {result.get('workflow_info', {}).get('iterations', 'N/A')}")
         print(f"- 答案质量: {result.get('workflow_info', {}).get('answer_quality', 'N/A')}")
