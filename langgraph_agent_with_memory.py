@@ -763,14 +763,43 @@ def preprocess_node(state: AgentState) -> AgentState:
 
 
 def postprocess_node(state: AgentState) -> AgentState:
-    """后处理节点：更新记忆，生成最终响应"""
+    """后处理节点：LLM整理工具结果 + 更新记忆 + 生成最终响应"""
     import time
     start_time = time.time()
 
     print("[后处理节点] 处理最终答案")
 
     memory_manager = get_memory_manager()
-    final_answer = state["final_answer"] or "抱歉，处理您的问题时遇到错误，请稍后再试。"
+    raw_answer = state.get("final_answer") or "抱歉，处理您的问题时遇到错误，请稍后再试。"
+    tool_results = state.get("tool_results") or {}
+    raw_context = state.get("raw_context") or ""
+
+    # LLM 整理：有工具调用结果时，让 LLM 整理为自然客服回复
+    if tool_results and raw_answer:
+        try:
+            synthesis_prompt = f"""你是一名中国移动智能客服。请根据检索结果和工具调用结果，生成一段自然友好的客服回复。
+
+用户问题：{state['user_query']}
+
+检索上下文：
+{raw_context[:1000] if raw_context else '无'}
+
+工具结果摘要：
+{chr(10).join(f'- {k}: {str(v)[:200]}' for k, v in list(tool_results.items())[:5])}
+
+请直接输出面向用户的客服回复（自然语言，语气友好专业，不超过300字）："""
+            llm = get_llm()
+            synthesized = llm.invoke([HumanMessage(content=synthesis_prompt)]).content
+            if synthesized and len(synthesized.strip()) > 10:
+                final_answer = synthesized.strip()
+                print(f"[后处理节点] LLM已整理答案（原{len(raw_answer)}字 → {len(final_answer)}字）")
+            else:
+                final_answer = raw_answer
+        except Exception as e:
+            print(f"[后处理节点] LLM整理失败，使用原始答案: {e}")
+            final_answer = raw_answer
+    else:
+        final_answer = raw_answer
 
     # 添加助手消息到记忆
     memory_manager.add_message("assistant", final_answer)
@@ -782,35 +811,12 @@ def postprocess_node(state: AgentState) -> AgentState:
     adapted_answer = memory_manager.adapt_response(final_answer)
     conversation_summary = memory_manager.generate_summary()
 
-    # 安全打印（避免 LLM 输出中的 emoji 等字符导致 GBK 编码错误）
+    # 安全打印
     try:
-        print(f"[后处理节点] 调整后答案预览: {adapted_answer[:100]}...")
+        print(f"[后处理节点] 最终答案预览: {adapted_answer[:100]}...")
     except UnicodeEncodeError:
         safe_answer = adapted_answer.encode('gbk', errors='replace').decode('gbk', errors='replace')
-        print(f"[后处理节点] 调整后答案预览: {safe_answer[:100]}...")
-
-    # 监控跟踪
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        duration = time.time() - start_time
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="postprocess_node",
-                inputs={"final_answer": final_answer[:200], "query": state.get("user_query", "")},
-                outputs={"adapted_answer": adapted_answer[:200]},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 后处理节点监控跟踪失败: {e}")
-        try:
-            monitoring_system.track_workflow_end(
-                state['tracking_info'],
-                outputs={"final_answer": adapted_answer[:200]},
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 工作流结束监控跟踪失败: {e}")
+        print(f"[后处理节点] 最终答案预览: {safe_answer[:100]}...")
 
     return {**state, "final_answer": adapted_answer, "conversation_summary": conversation_summary}
 
@@ -1008,6 +1014,85 @@ def export_memory_to_file(filepath: str = "conversation_memory.json"):
 
 
 # ========== 测试函数 ==========
+async def run_agent_stream(user_query: str, max_iterations: int = 3):
+    """流式运行 Agent，逐步产出事件供前端实时展示。
+
+    使用 LangGraph astream_events 捕获每个节点完成后的状态变化，
+    让 Streamlit 等前端可以实时展示思考过程。
+
+    Yields:
+        {"type": "node_start", "node": str, "message": str}
+        {"type": "node_done", "node": str, "state": dict}
+        {"type": "final_answer", "answer": str, "result": dict}
+        {"type": "error", "message": str}
+    """
+    if not user_query or not user_query.strip():
+        yield {"type": "error", "message": "请输入有效的查询内容"}
+        return
+
+    workflow = create_workflow()
+    memory = MemorySaver()
+    app = workflow.compile(checkpointer=memory)
+
+    initial_state: AgentState = {
+        "user_query": user_query.strip(),
+        "messages": [],
+        "user_preferences": get_memory_manager().user_preferences,
+        "plan": None,
+        "tool_results": None,
+        "final_answer": None,
+        "raw_context": None,
+        "step": "agent",
+        "iteration": 0,
+        "max_iterations": max_iterations,
+        "conversation_summary": get_memory_manager().generate_summary(),
+        "tracking_info": None,
+        "active_skills": None,
+        "skill_context": None,
+    }
+
+    config = {"configurable": {"thread_id": "user_session_1"}}
+
+    try:
+        yield {"type": "node_start", "node": "preprocess", "message": "正在分析问题..."}
+        async for event in app.astream_events(initial_state, config, version="v2"):
+            kind = event.get("event", "")
+
+            if kind == "on_chain_start":
+                node_name = event.get("name", "")
+                if node_name in ("preprocess", "agent", "postprocess"):
+                    yield {"type": "node_start", "node": node_name, "message": _node_status_message(node_name)}
+
+            elif kind == "on_chain_end":
+                node_name = event.get("name", "")
+                output = event.get("data", {}).get("output", {})
+                if node_name == "agent" and isinstance(output, dict):
+                    # agent 节点完成，传递工具调用信息
+                    tool_results = output.get("tool_results") or {}
+                    plan = output.get("plan") or []
+                    yield {
+                        "type": "node_done", "node": node_name,
+                        "tool_calls": plan,
+                        "tool_results": {k: str(v)[:200] for k, v in tool_results.items()},
+                    }
+                elif node_name == "postprocess" and isinstance(output, dict):
+                    final_answer = output.get("final_answer", "")
+                    yield {"type": "final_answer", "answer": final_answer, "result": output}
+
+    except Exception as e:
+        yield {"type": "error", "message": f"处理失败: {e}"}
+
+
+def _node_status_message(node_name: str) -> str:
+    """节点状态消息"""
+    messages = {
+        "preprocess": "正在分析问题...",
+        "agent": "正在检索知识库并调用工具...",
+        "postprocess": "正在整理答案...",
+    }
+    return messages.get(node_name, f"正在执行 {node_name}...")
+
+
 def test_agent_with_memory():
     """测试带记忆的Agent"""
     test_queries = [
