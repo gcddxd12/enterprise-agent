@@ -764,9 +764,6 @@ def preprocess_node(state: AgentState) -> AgentState:
 
 def postprocess_node(state: AgentState) -> AgentState:
     """后处理节点：LLM整理工具结果 + 更新记忆 + 生成最终响应"""
-    import time
-    start_time = time.time()
-
     print("[后处理节点] 处理最终答案")
 
     memory_manager = get_memory_manager()

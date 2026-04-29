@@ -80,7 +80,7 @@ if prompt := st.chat_input("请输入您的问题"):
                             tool_results_collected.update(event["tool_results"])
                     elif event["type"] == "final_answer":
                         final_answer = event["answer"]
-                        raw_context = event.get("result", {}).get("raw_context", "")
+                        raw_context = event.get("result", {}).get("raw_context", "")  # noqa: F841 (nonlocal)
                         answer_placeholder.markdown(final_answer)
                         status_placeholder.success("完成")
                     elif event["type"] == "error":
