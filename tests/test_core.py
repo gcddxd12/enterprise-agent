@@ -5,29 +5,34 @@
 
 import sys
 import os
+import importlib
 
 # 确保项目根目录在 Python 路径中（CI 环境兼容）
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _PROJECT_ROOT)
-
-# CI 诊断：打印路径信息（便于排查）
-print(f"[CI-DEBUG] Project root: {_PROJECT_ROOT}", flush=True)
-print(f"[CI-DEBUG] sys.path[0]: {sys.path[0]}", flush=True)
-print(f"[CI-DEBUG] skill_manager.py exists: {os.path.exists(os.path.join(_PROJECT_ROOT, 'skill_manager.py'))}", flush=True)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
-
-# 诊断辅助：验证 skill_manager 是否可导入
-import importlib.util
-_skill_spec = importlib.util.find_spec("skill_manager")
-if _skill_spec is None:
-    raise RuntimeError(
-        f"CRITICAL: skill_manager module not found in Python path.\n"
-        f"  sys.path[0]: {sys.path[0]}\n"
-        f"  Project root: {_PROJECT_ROOT}\n"
-        f"  skill_manager.py exists: {os.path.exists(os.path.join(_PROJECT_ROOT, 'skill_manager.py'))}\n"
-        f"  Full sys.path: {sys.path[:5]}"
-    )
+def _safe_import(module_name: str):
+    """安全导入模块，失败时打印详细诊断信息"""
+    try:
+        return importlib.import_module(module_name)
+    except Exception as e:
+        print(f"\n[CI-DEBUG] 导入 {module_name} 失败!")
+        print(f"  sys.path[0:3]: {sys.path[:3]}")
+        print(f"  Project root: {_PROJECT_ROOT}")
+        py_file = os.path.join(_PROJECT_ROOT, f"{module_name}.py")
+        print(f"  {py_file} exists: {os.path.exists(py_file)}")
+        if os.path.exists(py_file):
+            print(f"  File size: {os.path.getsize(py_file)} bytes")
+            # 检查语法
+            try:
+                import py_compile
+                py_compile.compile(py_file, doraise=True)
+                print(f"  Syntax: OK")
+            except py_compile.PyCompileError as ce:
+                print(f"  Syntax ERROR: {ce}")
+        raise
 
 
 class TestSkillManager:
@@ -35,9 +40,8 @@ class TestSkillManager:
 
     def test_skill_loading(self):
         """验证 SkillManager 能加载所有 skill 文件"""
-        from skill_manager import get_skill_manager
-
-        mgr = get_skill_manager(skills_dir="./skills")
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         skills = mgr.list_skills()
         assert len(skills) >= 4, f"Expected at least 4 skills, got {len(skills)}"
 
@@ -49,42 +53,32 @@ class TestSkillManager:
 
     def test_trigger_index_built(self):
         """验证倒排索引构建正确"""
-        from skill_manager import get_skill_manager
-
-        mgr = get_skill_manager(skills_dir="./skills")
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         assert "套餐" in mgr._trigger_index
         assert "5g" in mgr._trigger_index
         assert "宽带" in mgr._trigger_index
 
     def test_keyword_matching(self):
         """验证关键词匹配返回正确 skill"""
-        from skill_manager import get_skill_manager
-
-        mgr = get_skill_manager(skills_dir="./skills")
-
-        # 5G套餐查询应匹配 5G套餐咨询
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         result = mgr.find_matching_skills("我想办个5G套餐，每月100块左右")
         assert len(result) > 0
         assert result[0].name == "5G套餐咨询"
 
     def test_matching_by_priority(self):
         """验证多 skill 匹配时按优先级排序"""
-        from skill_manager import get_skill_manager
-
-        mgr = get_skill_manager(skills_dir="./skills")
-
-        # "投诉"匹配投诉处理(9)和可能的其他
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         result = mgr.find_matching_skills("我要投诉5G套餐乱扣费")
         assert len(result) > 0
-        # 投诉处理 priority=9，应该排第一
         assert result[0].name == "投诉处理"
 
     def test_build_system_prompt(self):
         """验证动态系统提示构建"""
-        from skill_manager import get_skill_manager
-
-        # 这个测试只验证函数存在且可调用
-        mgr = get_skill_manager(skills_dir="./skills")
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         skill = mgr.get_skill("5G套餐咨询")
         assert skill is not None
         assert "禁止一次性列出全部套餐" in skill.content
@@ -92,9 +86,8 @@ class TestSkillManager:
 
     def test_unknown_query_no_match(self):
         """验证无关查询不匹配任何 skill"""
-        from skill_manager import get_skill_manager
-
-        mgr = get_skill_manager(skills_dir="./skills")
+        sm = _safe_import("skill_manager")
+        mgr = sm.get_skill_manager(skills_dir="./skills")
         result = mgr.find_matching_skills("今天天气怎么样")
         assert len(result) == 0
 
