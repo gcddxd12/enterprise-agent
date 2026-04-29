@@ -400,51 +400,64 @@ def knowledge_search(query: str) -> str:
                 except Exception as e2:
                     print(f"[WARN] RAG检索失败监控跟踪失败: {e2}")
 
-    # 回退到模拟模式
-    print(f"[INFO] 使用模拟模式检索查询: '{query}'")
-    mock_responses = {
-        "套餐": "中国移动提供多种5G套餐，从39元至399元不等，包含不同额度的国内流量和语音通话时间，具体可登录中国移动APP或拨打10086查询。",
-        "宽带": "中国移动FTTR全屋光宽带采用XGS-PON+Wi-Fi7融合组网，实现家庭全域光纤入室、无缝漫游，支持多设备并发高速上网。",
-        "流量": "中国移动5G套餐包含通用流量和定向流量，通用流量可在国内任意网络环境下使用，定向流量适用于特定APP免流。",
-        "默认": "根据中国移动知识库信息，您的问题已记录，我们将尽快为您提供详细解答。如需人工服务，可拨打10086。"
-    }
-
-    for key, response in mock_responses.items():
-        if key in query:
-            # 根据用户偏好调整响应
+    # 回退到内存知识库仓储
+    print(f"[INFO] 使用内存知识库检索查询: '{query}'")
+    try:
+        from repositories import get_knowledge_repo
+        repo = get_knowledge_repo()
+        results = repo.search(query, top_k=3)
+        if results:
+            parts = [f"[{r['category']}] {r['content']}" for r in results]
+            response = "\n\n".join(parts)
             adapted_response = memory_manager.adapt_response(response)
             return adapted_response
+    except Exception as e:
+        print(f"[WARN] 知识库仓储检索失败: {e}")
 
-    default_response = mock_responses["默认"]
+    default_response = "根据中国移动知识库信息，您的问题已记录，我们将尽快为您提供详细解答。如需人工服务，可拨打10086。"
     adapted_response = memory_manager.adapt_response(default_response)
     return adapted_response
 
 
 @tool
 def query_ticket_status(ticket_id: str) -> str:
-    """模拟查询工单状态"""
+    """查询工单处理状态。输入工单号（如TK-123456），返回当前处理进度。"""
     if not ticket_id or not isinstance(ticket_id, str) or not ticket_id.strip():
         return "错误：请提供有效的工单号（如 TK-123456）"
     ticket_id = ticket_id.strip()
-    mock_status = {
-        "TK-123456": "您的工单 TK-123456 已受理，正在处理中，预计48小时内完成。",
-        "TK-789012": "工单 TK-789012 已处理完毕，请登录系统查看结果。",
-        "default": "未找到工单信息，请确认工单号是否正确。"
-    }
 
-    memory_manager = get_memory_manager()
-    response = mock_status.get(ticket_id, mock_status["default"])
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
+    try:
+        from repositories import get_ticket_repo
+        repo = get_ticket_repo()
+        ticket = repo.get_status(ticket_id)
+        if ticket:
+            memory_manager = get_memory_manager()
+            response = (
+                f"工单 {ticket['ticket_id']}：{ticket['type']}\n"
+                f"状态：{ticket['status']}  |  优先级：{ticket['priority']}  |  处理人：{ticket['handler']}\n"
+                f"详情：{ticket['detail']}\n"
+                f"创建时间：{ticket['created_at']}"
+            )
+            return memory_manager.adapt_response(response)
+        else:
+            return f"未找到工单「{ticket_id}」的信息，请确认工单号是否正确。可尝试提供手机号查询关联工单。"
+    except Exception as e:
+        return f"工单查询服务暂不可用: {e}"
 
 
 @tool
 def escalate_to_human(query: str) -> str:
-    """模拟转人工处理"""
+    """将用户问题转接给人工客服处理。适用于投诉升级、复杂业务办理、敏感问题等场景。"""
     memory_manager = get_memory_manager()
-    response = "感谢您的耐心，我已将您的问题转接给人工客服，他们将尽快与您联系（预计5分钟内）。"
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
+    try:
+        from repositories import get_escalation_repo
+        repo = get_escalation_repo()
+        result = repo.escalate(query, priority="normal")
+        response = result.get("message", "已为您转接人工客服，请稍候。")
+        return memory_manager.adapt_response(response)
+    except Exception as e:
+        response = "感谢您的耐心，我已将您的问题转接给人工客服，他们将尽快与您联系（预计5分钟内）。"
+        return memory_manager.adapt_response(response)
 
 
 @tool
