@@ -11,7 +11,6 @@ import glob
 import yaml
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
-from langchain_core.tools import tool
 
 
 @dataclass
@@ -136,6 +135,7 @@ def get_skill_manager(skills_dir: str = "./skills") -> SkillManager:
 # ========== use_skill 工具 ==========
 def create_use_skill_tool():
     """创建 use_skill 工具，供LLM在ReAct循环中主动加载skill指令"""
+    from langchain_core.tools import tool  # 延迟导入，避免CI环境无此依赖时模块加载失败
 
     @tool
     def use_skill(skill_name: str) -> str:
