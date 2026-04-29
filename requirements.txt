@@ -9,13 +9,12 @@ python-dotenv
 pytest
 streamlit
 pyyaml>=6.0
-mcp>=1.0
+pdfplumber
+pypdf
 
 # 监控和评估依赖
-langsmith>=0.1.0  # LangSmith SDK for tracing and monitoring
-structlog>=24.1.0  # Structured logging
-prometheus-client>=0.20.0  # Metrics collection (optional)
-psutil>=5.9.0  # System metrics collection
-python-json-logger>=3.0.0  # JSON logging support
-rich>=13.7.0  # Console output formatting
-watchdog>=3.0.0  # File system monitoring (optional)
+langsmith>=0.1.0
+structlog>=24.1.0
+prometheus-client>=0.20.0
+psutil>=5.9.0
+watchdog>=3.0.0

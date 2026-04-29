@@ -3,6 +3,15 @@ from langgraph_agent_with_memory import run_langgraph_agent_with_memory as run_l
 
 st.set_page_config(page_title="中国移动智能客服 Agent", page_icon="📶")
 
+# 稳定的 widget key 计数器，避免 hash() 跨进程碰撞
+if "_key_counter" not in st.session_state:
+    st.session_state._key_counter = 0
+
+
+def _next_key() -> str:
+    st.session_state._key_counter += 1
+    return f"widget_{st.session_state._key_counter}"
+
 st.title("📶 中国移动智能客服 Agent")
 st.markdown("输入您的问题，Agent 将自动规划、调用工具并验证答案。支持套餐、宽带、5G、物联网、云计算等业务咨询。")
 
@@ -26,7 +35,7 @@ for msg in st.session_state.messages:
                 with col_raw:
                     st.markdown("**知识检索详情**")
                     st.text_area("原始检索上下文", msg["raw"], height=300,
-                                 key=f"raw_{hash(msg['content'])}",
+                                 key=f"raw_{msg['raw']}",
                                  label_visibility="collapsed")
             else:
                 st.markdown(msg["content"])
@@ -57,7 +66,7 @@ if prompt := st.chat_input("请输入您的问题"):
                 "原始检索上下文",
                 raw_context if raw_context else "无检索结果",
                 height=300,
-                key=f"raw_{hash(final_answer)}",
+                key=_next_key(),
                 label_visibility="collapsed"
             )
 

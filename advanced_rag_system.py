@@ -22,7 +22,6 @@ __all__ = [
 
 import os
 import json
-import pickle
 import hashlib
 from typing import List, Dict, Any, Tuple, Optional, Callable
 from datetime import datetime, timedelta
@@ -82,31 +81,58 @@ class VectorCache:
         self._load_cache()
 
     def _load_cache(self):
-        """加载持久化缓存"""
-        cache_file = os.path.join(self.cache_dir, "vector_cache.pkl")
+        """加载持久化缓存（JSON 格式，避免 pickle 安全风险）"""
+        cache_file = os.path.join(self.cache_dir, "vector_cache.json")
         if os.path.exists(cache_file):
             try:
-                with open(cache_file, "rb") as f:
-                    data = pickle.load(f)
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
                     self.embedding_cache = data.get("embedding_cache", {})
-                    self.result_cache = data.get("result_cache", {})
                     self.stats = data.get("stats", self.stats)
+                    # 从 JSON 重建 result_cache 中的 Document 对象
+                    raw_results = data.get("result_cache", {})
+                    for key, entry in raw_results.items():
+                        docs = []
+                        for doc_dict in entry.get("results", []):
+                            docs.append(Document(
+                                page_content=doc_dict.get("page_content", ""),
+                                metadata=doc_dict.get("metadata", {})
+                            ))
+                        self.result_cache[key] = {
+                            "results": docs,
+                            "timestamp": entry.get("timestamp", ""),
+                            "access_count": entry.get("access_count", 0)
+                        }
                 print(f"向量缓存已加载，条目数: {len(self.embedding_cache)} 个嵌入，{len(self.result_cache)} 个结果")
             except Exception as e:
                 print(f"加载缓存失败: {e}")
 
     def _save_cache(self):
-        """保存缓存到文件"""
-        cache_file = os.path.join(self.cache_dir, "vector_cache.pkl")
+        """保存缓存到文件（JSON 格式）"""
+        cache_file = os.path.join(self.cache_dir, "vector_cache.json")
         try:
+            # 将 result_cache 中的 Document 对象序列化为 dict
+            serializable_results = {}
+            for key, entry in self.result_cache.items():
+                docs = []
+                for doc in entry.get("results", []):
+                    docs.append({
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata
+                    })
+                serializable_results[key] = {
+                    "results": docs,
+                    "timestamp": entry.get("timestamp", ""),
+                    "access_count": entry.get("access_count", 0)
+                }
             data = {
                 "embedding_cache": self.embedding_cache,
-                "result_cache": self.result_cache,
+                "result_cache": serializable_results,
                 "stats": self.stats,
                 "timestamp": datetime.now().isoformat()
             }
-            with open(cache_file, "wb") as f:
-                pickle.dump(data, f)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"保存缓存失败: {e}")
 

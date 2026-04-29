@@ -14,7 +14,6 @@ LangGraph 企业智能客服 Agent - 带记忆版本
 
 import os
 import json
-import re
 from datetime import date, datetime
 from typing import TypedDict, List, Dict, Any, Literal, Optional, Annotated
 from dotenv import load_dotenv
@@ -24,7 +23,6 @@ from langchain_community.chat_models import ChatTongyi
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
-import operator
 
 # 尝试导入高级RAG系统
 try:
@@ -34,14 +32,6 @@ try:
 except ImportError as e:
     print(f"警告：高级RAG系统导入失败，将使用模拟模式: {e}")
     ADVANCED_RAG_AVAILABLE = False
-
-# 尝试导入多模态支持系统
-try:
-    from multimodal_support import MultimodalTools, MediaDetector, MediaType
-    MULTIMODAL_AVAILABLE = True
-except ImportError as e:
-    print(f"警告：多模态支持系统导入失败，将使用模拟模式: {e}")
-    MULTIMODAL_AVAILABLE = False
 
 # 尝试导入监控系统
 try:
@@ -908,8 +898,11 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
 
     memory_info = {
         "conversation_length": len(memory_manager.conversation_history),
-        "user_preferences": dict(memory_manager.user_preferences.get("frequent_topics", set())),
-        "recent_topics": list(memory_manager.user_preferences.get("frequent_topics", [])),
+        "user_preferences": {
+            k: (list(v) if isinstance(v, set) else v)
+            for k, v in memory_manager.user_preferences.items()
+        },
+        "recent_topics": list(memory_manager.user_preferences.get("frequent_topics", set())),
         "conversation_summary": memory_manager.generate_summary()
     }
 
@@ -992,7 +985,7 @@ def export_memory_to_file(filepath: str = "conversation_memory.json"):
         "user_preferences": {
             "language_style": memory_manager.user_preferences["language_style"],
             "detail_level": memory_manager.user_preferences["detail_level"],
-            "frequent_topics": list(memory_manager.user_preferences.get("frequent_topics", [])),
+            "frequent_topics": list(memory_manager.user_preferences.get("frequent_topics", set())),
             "last_interaction": memory_manager.user_preferences["last_interaction"]
         },
         "export_timestamp": datetime.now().isoformat()

@@ -353,12 +353,16 @@ def get_mcp_manager() -> Optional[MCPClientManager]:
     return _mcp_manager
 
 
-def init_mcp_tools(config_path: str = "./mcp_servers.yaml") -> List[StructuredTool]:
+def init_mcp_tools(config_path: str = "./mcp_servers.yaml", force: bool = False) -> List[StructuredTool]:
     """初始化 MCP 连接并返回 LangChain 工具列表"""
     global _mcp_manager
-    if _mcp_manager is not None:
+    if _mcp_manager is not None and not force:
         print("[MCP] MCPClientManager 已初始化，跳过")
         return []
+
+    if force and _mcp_manager is not None:
+        _mcp_manager.close_all()
+        _mcp_manager = None
 
     try:
         _mcp_manager = MCPClientManager(config_path=config_path)
