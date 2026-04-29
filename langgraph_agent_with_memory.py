@@ -331,6 +331,9 @@ init_advanced_rag()
 def knowledge_search(query: str) -> str:
     """从中国移动知识库中检索信息，返回答案。适用于套餐资费、5G业务、宽带、物联网、
     云计算、算力网络、网络安全、政企服务等中国移动相关业务咨询。"""
+    if not query or not isinstance(query, str) or not query.strip():
+        return "错误：请提供有效的查询内容"
+    query = query.strip()
     import time
     start_time = time.time()
 
@@ -430,6 +433,9 @@ def knowledge_search(query: str) -> str:
 @tool
 def query_ticket_status(ticket_id: str) -> str:
     """模拟查询工单状态"""
+    if not ticket_id or not isinstance(ticket_id, str) or not ticket_id.strip():
+        return "错误：请提供有效的工单号（如 TK-123456）"
+    ticket_id = ticket_id.strip()
     mock_status = {
         "TK-123456": "您的工单 TK-123456 已受理，正在处理中，预计48小时内完成。",
         "TK-789012": "工单 TK-789012 已处理完毕，请登录系统查看结果。",
@@ -842,6 +848,15 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
     Returns:
         Dict containing plan, tool_results, final_answer, workflow info, and memory info
     """
+    if not user_query or not isinstance(user_query, str) or not user_query.strip():
+        return {
+            "plan": None, "tool_results": None,
+            "final_answer": "请输入有效的查询内容",
+            "raw_context": "", "active_skills": [],
+            "mcp_status": {}, "workflow_info": {"iterations": 0, "final_step": None, "answer_quality": "N/A"},
+            "memory_info": {"conversation_length": 0, "user_preferences": {}, "recent_topics": [], "conversation_summary": ""}
+        }
+    user_query = user_query.strip()
     memory_manager = get_memory_manager()
 
     # 初始化状态
@@ -862,22 +877,34 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
         "skill_context": None,
     }
 
-    workflow = create_workflow()
+    try:
+        workflow = create_workflow()
+    except Exception as e:
+        return {
+            "plan": None, "tool_results": None,
+            "final_answer": f"工作流创建失败: {e}",
+            "raw_context": "", "active_skills": [],
+            "mcp_status": {}, "workflow_info": {"iterations": 0, "final_step": None, "answer_quality": "N/A"},
+            "memory_info": {"conversation_length": 0, "user_preferences": {}, "recent_topics": [], "conversation_summary": ""}
+        }
 
-    # 检查点存储器（支持会话持久化）
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory)
+    try:
+        memory = MemorySaver()
+        app = workflow.compile(checkpointer=memory)
 
-    print(f"\n{'='*60}")
-    print(f"开始处理查询: {user_query}")
-    print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"开始处理查询: {user_query}")
+        print(f"{'='*60}")
 
-    config = {"configurable": {"thread_id": "user_session_1"}}
-    final_state = app.invoke(initial_state, config)
+        config = {"configurable": {"thread_id": "user_session_1"}}
+        final_state = app.invoke(initial_state, config)
 
-    print(f"\n{'='*60}")
-    print(f"处理完成")
-    print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"处理完成")
+        print(f"{'='*60}")
+    except Exception as e:
+        print(f"Agent 执行失败: {e}")
+        final_state = None
 
     memory_info = {
         "conversation_length": len(memory_manager.conversation_history),
@@ -899,7 +926,7 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
     return {
         "plan": final_state.get("plan") if final_state else None,
         "tool_results": final_state.get("tool_results") if final_state else None,
-        "final_answer": final_state.get("final_answer") if final_state else None,
+        "final_answer": final_state.get("final_answer") if final_state else "处理失败，请稍后重试",
         "raw_context": final_state.get("raw_context", "") if final_state else "",
         "active_skills": final_state.get("active_skills", []) if final_state else [],
         "mcp_status": mcp_status,
@@ -1037,10 +1064,10 @@ if __name__ == "__main__":
             continue
 
         result = run_langgraph_agent_with_memory(query)
-        print(f"\n助手: {result['final_answer']}")
+        print(f"\n助手: {result.get('final_answer', '处理失败')}")
         print(f"\n[调试信息]")
-        print(f"- 任务规划: {result['plan']}")
-        print(f"- 迭代次数: {result['workflow_info']['iterations']}")
-        print(f"- 答案质量: {result['workflow_info']['answer_quality']}")
-        print(f"- 对话长度: {result['memory_info']['conversation_length']} 条消息")
-        print(f"- 用户偏好: {result['memory_info']['user_preferences']}")
+        print(f"- 任务规划: {result.get('plan')}")
+        print(f"- 迭代次数: {result.get('workflow_info', {}).get('iterations', 'N/A')}")
+        print(f"- 答案质量: {result.get('workflow_info', {}).get('answer_quality', 'N/A')}")
+        print(f"- 对话长度: {result.get('memory_info', {}).get('conversation_length', 0)} 条消息")
+        print(f"- 用户偏好: {result.get('memory_info', {}).get('user_preferences', {})}")
