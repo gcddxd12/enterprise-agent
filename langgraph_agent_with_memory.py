@@ -19,6 +19,7 @@ from datetime import date, datetime
 from typing import TypedDict, List, Dict, Any, Literal, Optional, Annotated
 from dotenv import load_dotenv
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
 from langchain_community.chat_models import ChatTongyi
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -62,65 +63,28 @@ except ImportError as e:
     MONITORING_AVAILABLE = False
     monitoring_system = None
 
-# 异步执行器全局变量
-async_executor = None
-parallel_scheduler = None
-streaming_handler = None
-
-# 工作流配置
-USE_ASYNC_EXECUTION = True  # 默认使用异步执行
-
-# 尝试导入异步执行器
-try:
-    from async_executor import (
-        AsyncToolExecutor,
-        ParallelTaskScheduler,
-        StreamingResponseHandler,
-        get_async_executor,
-        get_parallel_scheduler,
-        get_streaming_handler,
-        run_tools_parallel,
-        run_tools_streaming,
-        TaskPriority,
-        TaskStatus,
-        StreamChunk
-    )
-    ASYNC_EXECUTOR_AVAILABLE = True
-    print("[INFO] 异步执行器已导入")
-except ImportError as e:
-    print(f"警告：异步执行器导入失败，将使用同步执行模式: {e}")
-    ASYNC_EXECUTOR_AVAILABLE = False
-
 # 加载环境变量
 load_dotenv()
 api_key = os.getenv("DASHSCOPE_API_KEY")
 
 
-# ========== 增强状态定义（带记忆） ==========
+# ========== AgentState 定义（标准 ReAct Agent） ==========
 class AgentState(TypedDict):
-    """Agent 工作流的状态定义（带记忆）"""
-    # 输入和上下文
+    """标准 ReAct Agent 的工作流状态"""
     user_query: str
-    # 对话历史
     messages: Annotated[list, add_messages]
-    # 用户偏好
-    user_preferences: Dict[str, Any]
-    # 规划阶段
-    plan: Optional[List[str]]
-    # 执行阶段
-    tool_results: Optional[Dict[str, str]]
-    # 验证阶段
     final_answer: Optional[str]
-    # 元数据
-    step: Literal["planning", "execution", "validation", "completed", "escalate"]
-    # 循环控制
+    raw_context: Optional[str]  # RAG 原始检索上下文（展示用）
+    tool_results: Optional[Dict[str, str]]  # 工具调用记录
+    plan: Optional[List[str]]  # 已执行的工具列表
+    step: Literal["agent", "completed"]
     iteration: int
     max_iterations: int
-    # 条件判断
-    needs_human_escalation: bool
-    answer_quality: Optional[Literal["poor", "fair", "good"]]
-    # 记忆摘要
     conversation_summary: Optional[str]
+    user_preferences: Dict[str, Any]
+    tracking_info: Optional[Dict[str, Any]]
+    active_skills: Optional[List[str]]  # 已激活的skill名称列表
+    skill_context: Optional[str]  # 合并后的skill指令文本
 
 
 # ========== 记忆管理器 ==========
@@ -166,16 +130,24 @@ class MemoryManager:
         topics = set()
         for msg in user_messages:
             content = msg["content"].lower()
-            if "密码" in content:
-                topics.add("密码重置")
+            if "套餐" in content or "资费" in content:
+                topics.add("套餐查询")
+            elif "流量" in content:
+                topics.add("流量查询")
+            elif "话费" in content or "账单" in content:
+                topics.add("话费账单")
+            elif "宽带" in content or "光纤" in content:
+                topics.add("宽带业务")
             elif "工单" in content:
                 topics.add("工单查询")
             elif "天气" in content:
                 topics.add("天气查询")
             elif "股票" in content:
                 topics.add("股票查询")
-            elif "转人工" in content:
-                topics.add("人工客服")
+            elif "5G" in content or "信号" in content:
+                topics.add("5G业务")
+            elif "物联网" in content or "IoT" in content:
+                topics.add("物联网")
             elif "图片" in content or "图像" in content or "照片" in content:
                 topics.add("图像处理")
             elif "文档" in content or "pdf" in content or "word" in content or "excel" in content:
@@ -243,86 +215,19 @@ def get_memory_manager():
     return _memory_manager
 
 
-# ========== 模拟 LLM（带记忆增强） ==========
+# ========== LLM 实例（真实模型） ==========
+_llm = None
+
 def get_llm():
-    """获取 LLM 实例（带记忆上下文）"""
-    # 使用模拟 LLM 避免 API 调用
-    class MockLLM:
-        def invoke(self, input_dict):
-            class MockResponse:
-                def __init__(self, content):
-                    self.content = content
-
-            memory_manager = get_memory_manager()
-            query = input_dict.get("query", "")
-
-            # 检查对话历史中是否有相似问题
-            recent_history = memory_manager.get_recent_history(3)
-            similar_questions = []
-            for msg in recent_history:
-                if msg["role"] == "user" and msg["content"] != query:
-                    similar_questions.append(msg["content"])
-
-            # 模拟响应（带记忆感知）
-            if "重置密码" in query:
-                if "密码重置" in memory_manager.user_preferences.get("frequent_topics", set()):
-                    response = '["knowledge_search: 重置密码（您之前也问过类似问题）"]'
-                else:
-                    response = '["knowledge_search: 重置密码"]'
-                    memory_manager.user_preferences["frequent_topics"].add("密码重置")
-            elif "TK-123456" in query:
-                response = '["ticket_query: TK-123456"]'
-            elif "今天" in query:
-                response = '["date_query"]'
-            elif "转人工" in query:
-                response = '["escalate"]'
-            elif "天气" in query:
-                city = "北京"
-                if "上海" in query:
-                    city = "上海"
-                elif "广州" in query:
-                    city = "广州"
-                elif "深圳" in query:
-                    city = "深圳"
-                response = f'["weather_query: {city}"]'
-            elif "股票" in query:
-                symbol = "AAPL"
-                if "谷歌" in query or "GOOGL" in query:
-                    symbol = "GOOGL"
-                elif "特斯拉" in query or "TSLA" in query:
-                    symbol = "TSLA"
-                response = f'["stock_query: {symbol}"]'
-            elif "上传" in query or "文件" in query:
-                # 多模态：文件上传处理
-                response = '["file_upload_processing: uploaded_file.pdf"]'
-            elif "图片" in query or "图像" in query or "照片" in query or "截图" in query or "screenshot" in query.lower():
-                # 多模态：图像分析
-                # 尝试从查询中提取文件路径
-                if "screenshot" in query.lower() or "截图" in query:
-                    response = '["image_analysis: screenshot.png"]'
-                else:
-                    response = '["image_analysis: test_image.png"]'
-            elif "文档" in query or "pdf" in query.lower() or "word" in query.lower() or "excel" in query.lower():
-                # 多模态：文档处理
-                if "pdf" in query.lower():
-                    response = '["document_processing: test_document.pdf"]'
-                elif "word" in query.lower():
-                    response = '["document_processing: test_report.docx"]'
-                elif "excel" in query.lower():
-                    response = '["document_processing: test_data.xlsx"]'
-                else:
-                    response = '["document_processing: document.pdf"]'
-            else:
-                # 如果有相似历史问题，可以引用
-                if similar_questions:
-                    ref = similar_questions[0][:20] + "..."
-                    response = f'["knowledge_search: {query}（参考之前问题：{ref}）"]'
-                else:
-                    response = f'["knowledge_search: {query}"]'
-
-            return MockResponse(response)
-
-    return MockLLM()
+    """获取 LLM 实例（单例模式，使用阿里百炼 qwen-plus 模型）"""
+    global _llm
+    if _llm is None:
+        _llm = ChatTongyi(
+            model="qwen-plus",
+            temperature=0,
+            dashscope_api_key=api_key
+        )
+    return _llm
 
 
 # ========== 高级RAG系统初始化 ==========
@@ -380,16 +285,16 @@ def init_advanced_rag():
                 # 如果无法获取文档，使用一些默认文档
                 documents_for_bm25 = [
                     Document(
-                        page_content="如何重置密码？您可以通过登录页面点击'忘记密码'链接重置密码。",
-                        metadata={"source": "faq", "topic": "password"}
+                        page_content="中国移动5G-A规模化商用采用低频广覆盖、中频容量承载、高频超高速补充的三层频谱组网，融合超级上行、通感一体、RedCap、无源物联增强技术。",
+                        metadata={"source": "cmcc_5g", "topic": "5G"}
                     ),
                     Document(
-                        page_content="产品价格信息：企业版每年10,000元，包含技术支持。",
-                        metadata={"source": "pricing", "topic": "price"}
+                        page_content="中国移动移动云构建全域分布式云架构，包含中心云、区域云、边缘云三级节点，提供专属云、私有云、混合云、本地容灾、多云管理全栈能力。",
+                        metadata={"source": "cmcc_cloud", "topic": "cloud"}
                     ),
                     Document(
-                        page_content="技术支持时间：工作日9:00-18:00，电话400-123-4567。",
-                        metadata={"source": "support", "topic": "contact"}
+                        page_content="中国移动算力网络以连接+算力+能力三位一体为核心架构，依托全国八大国家级算力枢纽节点布局，实现跨域算力调度与动态负载均衡。",
+                        metadata={"source": "cmcc_computing", "topic": "computing"}
                     )
                 ]
 
@@ -424,7 +329,8 @@ init_advanced_rag()
 # ========== 模拟工具 ==========
 @tool
 def knowledge_search(query: str) -> str:
-    """增强知识库检索（带记忆上下文和高级RAG）"""
+    """从中国移动知识库中检索信息，返回答案。适用于套餐资费、5G业务、宽带、物联网、
+    云计算、算力网络、网络安全、政企服务等中国移动相关业务咨询。"""
     import time
     start_time = time.time()
 
@@ -448,38 +354,30 @@ def knowledge_search(query: str) -> str:
             duration = time.time() - start_time
 
             if results and len(results) > 0:
-                # 提取最相关的结果
-                best_doc = results[0]
-                page_content = best_doc.page_content
+                # 取 top 3 条结果（原始内容带元数据，展示用）
+                top_results = results[:3]
+                display_parts = []
+                clean_parts = []
+                for doc in top_results:
+                    content = doc.page_content
+                    source = doc.metadata.get('source', '知识库')
+                    score = doc.metadata.get('final_score', 0) or doc.metadata.get('relevance_score', 0)
+                    # 显示版本（带元数据）
+                    display_parts.append(f"[{source}] (相关度:{score:.2f}) {content}")
+                    # 清洁版本（只保留纯文本内容，给 LLM 用）
+                    clean_parts.append(content)
 
-                # 根据元数据信息格式化响应
-                source = best_doc.metadata.get('source', '知识库')
-                score = best_doc.metadata.get('final_score', 0)
-                confidence_score = score if score else best_doc.metadata.get('relevance_score', 0)
+                response = "\n\n".join(clean_parts)
 
-                # 构建响应
-                if confidence_score > 0.5:
-                    confidence = "高度相关"
-                elif confidence_score > 0.2:
-                    confidence = "相关"
-                else:
-                    confidence = "参考信息"
-
-                response = f"[高级RAG检索] {confidence} 信息来自 {source}（相关性: {confidence_score:.2f}）：{page_content}"
-
-                # 如果分数较低，添加提示
-                if confidence_score < 0.2:
-                    response += "\n\n[注意] 检索到的信息相关性较低，建议转人工客服获取更准确的回答。"
-
-                # 添加检索统计信息（如果可用）
+                # 统计信息
                 if hasattr(advanced_rag_retriever, 'cache_manager'):
                     try:
                         cache_stats = advanced_rag_retriever.cache_manager.get_stats()
                         if cache_stats['result_hits'] > 0 or cache_stats['embedding_hits'] > 0:
                             total_hits = cache_stats['result_hits'] + cache_stats['embedding_hits']
-                            response += f"\n\n[缓存信息] 本次检索使用了缓存（总缓存命中: {total_hits} 次）"
-                    except Exception as e:
-                        print(f"[DEBUG] 获取缓存统计失败: {e}")
+                            response += f"\n\n[检索共找到 {len(top_results)} 条相关信息]"
+                    except Exception:
+                        pass
 
                 adapted_response = memory_manager.adapt_response(response)
 
@@ -512,10 +410,10 @@ def knowledge_search(query: str) -> str:
     # 回退到模拟模式
     print(f"[INFO] 使用模拟模式检索查询: '{query}'")
     mock_responses = {
-        "重置密码": "您可以通过登录页面点击'忘记密码'链接重置密码。系统将发送重置邮件到您的注册邮箱。",
-        "产品价格": "企业版产品价格为每年 10,000 元，包含所有功能和技术支持。",
-        "技术支持": "技术支持时间为工作日 9:00-18:00，电话：400-123-4567。",
-        "默认": "根据知识库信息，您的问题已记录，我们会尽快为您提供详细解答。"
+        "套餐": "中国移动提供多种5G套餐，从39元至399元不等，包含不同额度的国内流量和语音通话时间，具体可登录中国移动APP或拨打10086查询。",
+        "宽带": "中国移动FTTR全屋光宽带采用XGS-PON+Wi-Fi7融合组网，实现家庭全域光纤入室、无缝漫游，支持多设备并发高速上网。",
+        "流量": "中国移动5G套餐包含通用流量和定向流量，通用流量可在国内任意网络环境下使用，定向流量适用于特定APP免流。",
+        "默认": "根据中国移动知识库信息，您的问题已记录，我们将尽快为您提供详细解答。如需人工服务，可拨打10086。"
     }
 
     for key, response in mock_responses.items():
@@ -562,104 +460,247 @@ def get_current_date(query: str) -> str:
     return adapted_response
 
 
-@tool
-def weather_query(city: str) -> str:
-    """查询城市天气信息。支持北京、上海、广州、深圳等城市。"""
-    weather_data = {
-        "北京": "北京今天晴转多云，气温 15-25°C，北风2-3级。",
-        "上海": "上海今天多云，气温 18-28°C，东南风3-4级。",
-        "广州": "广州今天阵雨，气温 22-30°C，南风2-3级。",
-        "深圳": "深圳今天晴，气温 23-32°C，南风2级。",
-        "default": "该城市天气信息暂不可用，请稍后再试。"
+AGENT_TOOLS = []  # 延迟初始化
+
+def get_tools():
+    """获取 Agent 工具列表（延迟初始化）"""
+    global AGENT_TOOLS
+    if not AGENT_TOOLS:
+        from skill_manager import create_use_skill_tool
+        AGENT_TOOLS = [
+            knowledge_search,
+            query_ticket_status,
+            escalate_to_human,
+            get_current_date,
+            create_use_skill_tool(),
+        ]
+        # 集成 MCP 外部工具
+        try:
+            from mcp_client import init_mcp_tools
+            mcp_tools = init_mcp_tools()
+            if mcp_tools:
+                AGENT_TOOLS.extend(mcp_tools)
+        except Exception as e:
+            print(f"[MCP] 加载 MCP 工具失败: {e}")
+    return AGENT_TOOLS
+
+
+# ========== 系统提示词 ==========
+BASE_SYSTEM_PROMPT = """你是一名中国移动智能客服助手。你的职责是帮助用户解答中国移动业务相关问题。
+
+## 你的工具
+- **knowledge_search**: 从中国移动知识库检索信息。参数 query 请使用简洁关键词（如"5G套餐资费"、"宽带故障报修"、"流量包订购"），不要传完整长句。
+  适用场景：套餐资费、5G业务、宽带、流量、话费、信号、携号转网、国际漫游、积分、营业厅等业务咨询。
+- **query_ticket_status**: 查询工单状态。工单号格式为 TK-xxxxxx。
+- **escalate_to_human**: 当你无法回答用户问题、用户情绪激动、或用户明确要求转人工时，调用此工具。
+- **get_current_date**: 查询今天的日期。
+- **use_skill**: 当你需要特定领域的专业知识或处理流程时，加载对应的技能指令。可用技能请参考系统提示中"当前激活的专业技能"部分。
+
+## 行为准则
+1. 对于业务咨询，先调用 knowledge_search 检索（用关键词），再基于检索结果回答
+2. 如果用户问题涉及到你已激活的专业技能领域，严格遵守技能中定义的处理流程和话术
+3. 用亲切、专业的语气回复，称呼用户为"您"
+4. 只基于检索结果回答，不要编造没有的信息（套餐价格、流量额度等必须来源于检索结果）
+5. 如果检索结果包含了用户问的信息，整理成清晰的结构回复
+6. 如果检索结果不够或无法回答，告知用户并建议拨打10086或转人工
+7. 结尾可以引导用户进一步提问"""
+
+
+def build_system_prompt(active_skills: Optional[List[str]] = None) -> str:
+    """构建系统提示：基础提示 + 可用skill摘要 + 已激活skill的完整指令"""
+    prompt = BASE_SYSTEM_PROMPT
+
+    # 添加可用skill摘要（供LLM参考，知道何时调用 use_skill）
+    try:
+        from skill_manager import get_skill_manager
+        skill_manager = get_skill_manager()
+        all_skills = skill_manager.list_skills()
+        if all_skills:
+            prompt += "\n\n## 可用的专业技能（通过 use_skill 加载）\n"
+            for s in all_skills:
+                triggers_str = "、".join(s["triggers"][:5])
+                prompt += f"- **{s['name']}**: {s['description']}（触发词: {triggers_str}）\n"
+    except Exception:
+        pass
+
+    # 添加已激活skill的完整指令
+    if active_skills:
+        prompt += "\n\n## 当前激活的专业技能（请严格遵守以下指令）\n"
+        for skill_name in active_skills:
+            skill = skill_manager.get_skill(skill_name)
+            if skill:
+                prompt += f"\n### {skill.name}\n{skill.content}\n"
+
+    # 添加 MCP 工具描述
+    try:
+        from mcp_client import get_mcp_manager
+        mcp_mgr = get_mcp_manager()
+        if mcp_mgr:
+            mcp_desc = mcp_mgr.get_tool_descriptions()
+            if mcp_desc:
+                prompt += mcp_desc
+    except Exception:
+        pass
+
+    return prompt
+
+MAX_AGENT_STEPS = 5  # ReAct 循环最大步数
+
+
+def _use_skill_executor(tool_args) -> str:
+    """use_skill 工具的执行器包装"""
+    from skill_manager import get_skill_manager
+    skill_manager = get_skill_manager()
+    skill_name = tool_args.get("skill_name", "") if isinstance(tool_args, dict) else str(tool_args)
+    skill = skill_manager.get_skill(skill_name)
+    if skill:
+        return f"已加载技能「{skill.name}」:\n\n{skill.content}"
+    available = [s["name"] for s in skill_manager.list_skills()]
+    return f"未找到技能「{skill_name}」。可用技能: {', '.join(available)}"
+
+
+# ========== Agent 节点（标准 ReAct 模式） ==========
+def agent_node(state: AgentState) -> AgentState:
+    """标准 ReAct Agent 节点：LLM 自主决定工具调用，观察结果，迭代推理"""
+    import time
+    start_time = time.time()
+    print(f"[Agent] 开始 ReAct 推理循环")
+
+    llm = get_llm()
+    tools = get_tools()
+    llm_with_tools = llm.bind_tools(tools)
+
+    # 构建消息列表：动态系统提示 + 对话历史 + 用户问题
+    active_skills = state.get("active_skills", [])
+    system_prompt = build_system_prompt(active_skills)
+    messages = [SystemMessage(content=system_prompt)]
+
+    # 注入记忆上下文（如有）
+    conversation_summary = state.get("conversation_summary", "")
+    if conversation_summary:
+        messages.append(SystemMessage(content=f"对话历史摘要：{conversation_summary}"))
+
+    # 注入skill上下文（如有）
+    skill_context = state.get("skill_context", "")
+    if skill_context:
+        messages.append(SystemMessage(content=f"专业技能参考：\n{skill_context}"))
+
+    messages.append(HumanMessage(content=state["user_query"]))
+    print(f"[Agent] 初始消息数: {len(messages)}")
+
+    tool_results = {}
+    plan = []
+    raw_context = ""
+
+    # ReAct 循环
+    for step_idx in range(MAX_AGENT_STEPS):
+        print(f"[Agent] ReAct 第 {step_idx + 1} 步...")
+        step_start = time.time()
+
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
+        step_duration = time.time() - step_start
+
+        if not response.tool_calls:
+            # LLM 认为不需要更多工具 → 这是最终回答
+            final_answer = response.content or ""
+            print(f"[Agent] LLM 完成（无工具调用），答案长度: {len(final_answer)}, 耗时: {step_duration:.2f}s")
+
+            duration = time.time() - start_time
+            print(f"[Agent] ReAct 完成，共 {step_idx + 1} 步，总耗时: {duration:.2f}s")
+            print(f"[Agent] 调用工具: {plan}")
+            return {
+                **state,
+                "final_answer": final_answer,
+                "raw_context": raw_context,
+                "tool_results": tool_results,
+                "plan": plan,
+                "step": "completed"
+            }
+
+        # 执行工具调用
+        tool_names = []
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call.get("args", {})
+            tool_id = tool_call["id"]
+            tool_names.append(tool_name)
+
+            print(f"[Agent] 调用工具: {tool_name}, 参数: {str(tool_args)[:80]}")
+
+            # 提取查询参数
+            query_str = str(tool_args.get("query", list(tool_args.values())[0] if tool_args.values() else ""))
+            plan.append(f"{tool_name}: {query_str}")
+
+            # 执行工具（字典分发：本地工具 + MCP 工具）
+            tool_executors = {
+                "knowledge_search": lambda a: knowledge_search.run(a if isinstance(a, str) else str(a.get("query", list(a.values())[0] if a.values() else ""))),
+                "query_ticket_status": lambda a: query_ticket_status.run(a.get("ticket_id", query_str) if isinstance(a, dict) else str(a)),
+                "escalate_to_human": lambda a: escalate_to_human.run(query_str or ""),
+                "get_current_date": lambda a: get_current_date.run(query_str or ""),
+                "use_skill": lambda a: _use_skill_executor(a),
+            }
+            # 动态添加 MCP 工具执行器
+            try:
+                from mcp_client import get_mcp_manager
+                mcp_mgr = get_mcp_manager()
+                if mcp_mgr:
+                    for info in mcp_mgr.list_tools():
+                        # MCP call_tool 接受 dict，处理 string 回退
+                        tool_executors[info.name] = (
+                            lambda a, name=info.name: mcp_mgr.call_tool(
+                                name, a if isinstance(a, dict) else {"query": str(a)}
+                            )
+                        )
+            except Exception:
+                pass
+
+            try:
+                executor = tool_executors.get(tool_name)
+                if executor:
+                    result = executor(tool_args)
+                    if tool_name == "knowledge_search" and raw_context == "":
+                        raw_context = result  # 保留第一次检索结果
+                else:
+                    result = f"未知工具: {tool_name}"
+            except Exception as e:
+                result = f"工具执行失败: {e}"
+                print(f"[Agent] 工具 {tool_name} 执行异常: {e}")
+
+            tool_results[f"{tool_name}: {query_str[:50]}"] = result[:500]
+            messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+
+        print(f"[Agent] 第 {step_idx + 1} 步完成，调用: {tool_names}，耗时: {step_duration:.2f}s")
+
+    # 达到最大步数，强制输出
+    print(f"[Agent] 达到最大步数 {MAX_AGENT_STEPS}，强制输出最终回复")
+    llm_direct = get_llm()
+    force_prompt = f"""你是一名中国移动智能客服。已完成知识检索，请根据以下信息为用户问题生成回复。
+
+用户问题：{state['user_query']}
+
+检索结果：
+{raw_context if raw_context else '无检索结果'}
+
+请直接输出客服回复："""
+    try:
+        final_answer = llm_direct.invoke([HumanMessage(content=force_prompt)]).content
+    except Exception:
+        final_answer = "抱歉，处理您的问题需要更多时间，建议您拨打10086热线或前往就近营业厅咨询。"
+
+    duration = time.time() - start_time
+    print(f"[Agent] ReAct 完成（达最大步数），总耗时: {duration:.2f}s")
+    return {
+        **state,
+        "final_answer": final_answer,
+        "raw_context": raw_context,
+        "tool_results": tool_results,
+        "plan": plan,
+        "step": "completed"
     }
 
-    memory_manager = get_memory_manager()
-    response = weather_data.get(city, weather_data["default"])
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
 
-
-@tool
-def stock_query(symbol: str) -> str:
-    """查询股票实时价格。支持 AAPL、GOOGL、TSLA 等股票代码。"""
-    stock_data = {
-        "AAPL": "苹果公司 (AAPL) 当前价格 $175.20，今日上涨 2.3%。",
-        "GOOGL": "谷歌 (GOOGL) 当前价格 $155.80，今日下跌 0.5%。",
-        "TSLA": "特斯拉 (TSLA) 当前价格 $180.50，今日上涨 5.2%。",
-        "default": "该股票代码信息暂不可用，请确认代码是否正确。"
-    }
-
-    memory_manager = get_memory_manager()
-    response = stock_data.get(symbol, stock_data["default"])
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
-
-
-# ========== 多模态工具函数 ==========
-@tool
-def image_analysis(image_path: str) -> str:
-    """分析图像内容：OCR文字识别、物体检测、场景理解"""
-    memory_manager = get_memory_manager()
-
-    if not MULTIMODAL_AVAILABLE:
-        response = f"多模态支持不可用，无法分析图像：{image_path}"
-        adapted_response = memory_manager.adapt_response(response)
-        return adapted_response
-
-    try:
-        multimodal_tools = MultimodalTools()
-        result = multimodal_tools.analyze_image(image_path)
-        response = f"图像分析结果：\n{result}"
-    except Exception as e:
-        response = f"图像分析失败：{e}\n请确认文件路径：{image_path}"
-
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
-
-
-@tool
-def document_processing(document_path: str) -> str:
-    """处理文档：提取PDF、Word、Excel文件内容"""
-    memory_manager = get_memory_manager()
-
-    if not MULTIMODAL_AVAILABLE:
-        response = f"多模态支持不可用，无法处理文档：{document_path}"
-        adapted_response = memory_manager.adapt_response(response)
-        return adapted_response
-
-    try:
-        multimodal_tools = MultimodalTools()
-        result = multimodal_tools.extract_document_content(document_path)
-        response = f"文档处理结果：\n{result}"
-    except Exception as e:
-        response = f"文档处理失败：{e}\n请确认文件路径：{document_path}"
-
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
-
-
-@tool
-def file_upload_processing(file_path: str) -> str:
-    """处理上传的文件：自动识别类型并处理"""
-    memory_manager = get_memory_manager()
-
-    if not MULTIMODAL_AVAILABLE:
-        response = f"多模态支持不可用，无法处理文件：{file_path}"
-        adapted_response = memory_manager.adapt_response(response)
-        return adapted_response
-
-    try:
-        multimodal_tools = MultimodalTools()
-        result = multimodal_tools.process_uploaded_file(file_path)
-        response = f"文件处理完成：\n{result}"
-    except Exception as e:
-        response = f"文件处理失败：{e}\n请确认文件路径：{file_path}"
-
-    adapted_response = memory_manager.adapt_response(response)
-    return adapted_response
-
-
-# ========== LangGraph 节点函数（带记忆） ==========
+# ========== LangGraph 节点函数 ==========
 def preprocess_node(state: AgentState) -> AgentState:
     """预处理节点：处理用户输入，更新记忆"""
     print(f"[预处理节点] 处理查询: {state['user_query']}")
@@ -691,415 +732,28 @@ def preprocess_node(state: AgentState) -> AgentState:
             print(f"[WARN] 监控跟踪失败: {e}")
 
     print(f"[预处理节点] 对话摘要: {conversation_summary}")
-    return {**state, "conversation_summary": conversation_summary, "step": "planning", "tracking_info": tracking_info}
 
-
-def planning_node(state: AgentState) -> AgentState:
-    """规划节点：分析用户查询，拆解为任务列表（带记忆上下文）"""
-    import time
-    start_time = time.time()
-
-    print(f"[规划节点] 处理查询: {state['user_query']}")
-    print(f"[规划节点] 对话摘要: {state.get('conversation_summary', '无摘要')}")
-
-    # 使用模拟 LLM 生成规划
-    llm = get_llm()
-
-    # 使用原始查询，避免上下文干扰工具选择
-    enhanced_query = state['user_query']
-
-    response = llm.invoke({"query": enhanced_query}).content
-
+    # Skill匹配：基于关键词自动激活相关领域技能
+    active_skills = []
+    skill_context = None
     try:
-        tasks = json.loads(response)
-    except:
-        match = re.search(r'\[.*\]', response, re.DOTALL)
-        tasks = json.loads(match.group()) if match else []
-
-    duration = time.time() - start_time
-    print(f"[规划节点] 生成任务: {tasks} (耗时: {duration:.2f}s)")
-
-    # 监控跟踪：节点执行
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="planning_node",
-                inputs={"query": enhanced_query, "conversation_summary": state.get('conversation_summary')},
-                outputs={"tasks": tasks},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 规划节点监控跟踪失败: {e}")
-
-    # 根据配置决定下一步节点名称
-    if USE_ASYNC_EXECUTION and ASYNC_EXECUTOR_AVAILABLE:
-        next_step = "execution_async"
-    else:
-        next_step = "execution"
-
-    return {**state, "plan": tasks, "step": next_step}
-
-
-def execution_node(state: AgentState) -> AgentState:
-    """执行节点：执行规划的任务，收集结果"""
-    import time
-    start_time = time.time()
-
-    print(f"[执行节点] 执行任务: {state['plan']}")
-
-    if not state["plan"]:
-        duration = time.time() - start_time
-        # 监控跟踪：空执行节点
-        if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-            try:
-                monitoring_system.track_node_execution(
-                    state['tracking_info'],
-                    node_name="execution_node",
-                    inputs={"plan": state['plan']},
-                    outputs={"results": {}},
-                    duration=duration,
-                    success=True
-                )
-            except Exception as e:
-                print(f"[WARN] 执行节点监控跟踪失败: {e}")
-        return {**state, "tool_results": {}, "step": "validation"}
-
-    results = {}
-    # 为每个工具调用添加跟踪
-    tool_start_times = {}
-    for task in state["plan"]:
-        tool_start_time = time.time()
-
-        if task.startswith("knowledge_search:"):
-            query = task.replace("knowledge_search:", "").strip()
-            results[task] = knowledge_search.run(query)
-        elif task.startswith("ticket_query:"):
-            ticket_id = task.replace("ticket_query:", "").strip()
-            results[task] = query_ticket_status.run(ticket_id)
-        elif task.startswith("weather_query:"):
-            city = task.replace("weather_query:", "").strip()
-            results[task] = weather_query.run(city)
-        elif task.startswith("stock_query:"):
-            symbol = task.replace("stock_query:", "").strip()
-            results[task] = stock_query.run(symbol)
-        elif task == "escalate":
-            results[task] = escalate_to_human.run("")
-        elif task == "date_query":
-            results[task] = get_current_date.run("")
-        elif task.startswith("image_analysis:"):
-            image_path = task.replace("image_analysis:", "").strip()
-            results[task] = image_analysis.run(image_path)
-        elif task.startswith("document_processing:"):
-            doc_path = task.replace("document_processing:", "").strip()
-            results[task] = document_processing.run(doc_path)
-        elif task.startswith("file_upload_processing:"):
-            file_path = task.replace("file_upload_processing:", "").strip()
-            results[task] = file_upload_processing.run(file_path)
-        else:
-            results[task] = "未知任务"
-
-        tool_duration = time.time() - tool_start_time
-        # 记录工具调用指标
-        if MONITORING_AVAILABLE and monitoring_system:
-            try:
-                tool_name = task.split(":")[0] if ":" in task else task
-                monitoring_system.metrics.record_tool_call(tool_name, tool_duration, success=True)
-            except Exception as e:
-                print(f"[WARN] 工具调用指标记录失败: {e}")
-
-    duration = time.time() - start_time
-    print(f"[执行节点] 执行结果: {results} (总耗时: {duration:.2f}s)")
-
-    # 监控跟踪：执行节点
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="execution_node",
-                inputs={"plan": state['plan']},
-                outputs={"results": results},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 执行节点监控跟踪失败: {e}")
-
-    return {**state, "tool_results": results, "step": "validation"}
-
-
-def execution_node_async(state: AgentState) -> AgentState:
-    """异步执行节点：并行执行规划的任务，收集结果"""
-    import time
-    start_time = time.time()
-
-    print(f"[异步执行节点] 执行任务: {state['plan']}")
-
-    if not state["plan"]:
-        duration = time.time() - start_time
-        # 监控跟踪：空执行节点
-        if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-            try:
-                monitoring_system.track_node_execution(
-                    state['tracking_info'],
-                    node_name="execution_node_async",
-                    inputs={"plan": state['plan']},
-                    outputs={"results": {}},
-                    duration=duration,
-                    success=True
-                )
-            except Exception as e:
-                print(f"[WARN] 异步执行节点监控跟踪失败: {e}")
-        return {**state, "tool_results": {}, "step": "validation"}
-
-    # 初始化异步执行器（如果需要）
-    global async_executor, parallel_scheduler
-    if ASYNC_EXECUTOR_AVAILABLE:
-        try:
-            if async_executor is None:
-                async_executor = get_async_executor(max_workers=4)
-            if parallel_scheduler is None:
-                parallel_scheduler = get_parallel_scheduler()
-        except Exception as e:
-            print(f"[WARN] 异步执行器初始化失败，将回退到同步执行: {e}")
-            ASYNC_EXECUTOR_AVAILABLE = False
-
-    if ASYNC_EXECUTOR_AVAILABLE:
-        # 使用异步执行器并行执行任务
-        results = {}
-        tool_calls = []
-        task_to_tool_map = {}  # 映射：任务描述 -> 工具函数和参数
-
-        # 解析任务，构建工具调用列表
-        for task in state["plan"]:
-            if task.startswith("knowledge_search:"):
-                query = task.replace("knowledge_search:", "").strip()
-                tool_calls.append({
-                    "func": knowledge_search.run,
-                    "args": [query],
-                    "tool_name": "knowledge_search",
-                    "timeout": 30.0,
-                    "priority": 2  # NORMAL priority
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("ticket_query:"):
-                ticket_id = task.replace("ticket_query:", "").strip()
-                tool_calls.append({
-                    "func": query_ticket_status.run,
-                    "args": [ticket_id],
-                    "tool_name": "ticket_query",
-                    "timeout": 10.0,
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("weather_query:"):
-                city = task.replace("weather_query:", "").strip()
-                tool_calls.append({
-                    "func": weather_query.run,
-                    "args": [city],
-                    "tool_name": "weather_query",
-                    "timeout": 10.0,
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("stock_query:"):
-                symbol = task.replace("stock_query:", "").strip()
-                tool_calls.append({
-                    "func": stock_query.run,
-                    "args": [symbol],
-                    "tool_name": "stock_query",
-                    "timeout": 10.0,
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task == "escalate":
-                tool_calls.append({
-                    "func": escalate_to_human.run,
-                    "args": [""],
-                    "tool_name": "escalate_to_human",
-                    "timeout": 5.0,
-                    "priority": 3  # HIGH priority
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task == "date_query":
-                tool_calls.append({
-                    "func": get_current_date.run,
-                    "args": [""],
-                    "tool_name": "get_current_date",
-                    "timeout": 5.0,
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("image_analysis:"):
-                image_path = task.replace("image_analysis:", "").strip()
-                tool_calls.append({
-                    "func": image_analysis.run,
-                    "args": [image_path],
-                    "tool_name": "image_analysis",
-                    "timeout": 60.0,  # 图像分析可能耗时较长
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("document_processing:"):
-                doc_path = task.replace("document_processing:", "").strip()
-                tool_calls.append({
-                    "func": document_processing.run,
-                    "args": [doc_path],
-                    "tool_name": "document_processing",
-                    "timeout": 45.0,  # 文档处理可能耗时较长
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            elif task.startswith("file_upload_processing:"):
-                file_path = task.replace("file_upload_processing:", "").strip()
-                tool_calls.append({
-                    "func": file_upload_processing.run,
-                    "args": [file_path],
-                    "tool_name": "file_upload_processing",
-                    "timeout": 45.0,
-                    "priority": 2
-                })
-                task_to_tool_map[task] = len(tool_calls) - 1
-
-            else:
-                # 未知任务，直接记录结果
-                results[task] = "未知任务"
-
-        if tool_calls:
-            print(f"[异步执行节点] 准备并行执行 {len(tool_calls)} 个工具调用")
-
-            try:
-                # 并行执行工具调用
-                parallel_results = run_tools_parallel(tool_calls, timeout=60.0)
-
-                # 映射回任务结果
-                for task, tool_idx in task_to_tool_map.items():
-                    tool_call = tool_calls[tool_idx]
-                    tool_name = tool_call["tool_name"]
-
-                    # 查找对应的任务ID（任务ID是工具调用的索引）
-                    task_id = None
-                    for result_task_id, result in parallel_results.items():
-                        if f"tool_task_" in result_task_id and tool_idx == int(result_task_id.split("_")[2]):
-                            task_id = result_task_id
-                            break
-
-                    if task_id and task_id in parallel_results:
-                        result = parallel_results[task_id]
-                        if isinstance(result, Exception):
-                            results[task] = f"工具调用失败: {result}"
-                            # 记录失败指标
-                            if MONITORING_AVAILABLE and monitoring_system:
-                                try:
-                                    monitoring_system.metrics.record_tool_call(tool_name, 0.0, success=False)
-                                except Exception as e:
-                                    print(f"[WARN] 工具失败指标记录失败: {e}")
-                        else:
-                            results[task] = result
-                            # 记录成功指标（这里使用估计的执行时间）
-                            if MONITORING_AVAILABLE and monitoring_system:
-                                try:
-                                    # 估计执行时间（假设平均0.5秒）
-                                    monitoring_system.metrics.record_tool_call(tool_name, 0.5, success=True)
-                                except Exception as e:
-                                    print(f"[WARN] 工具成功指标记录失败: {e}")
-                    else:
-                        results[task] = "工具调用结果未找到"
-            except Exception as e:
-                print(f"[ERROR] 并行工具调用失败，将回退到串行执行: {e}")
-                # 回退到同步执行
-                return execution_node(state)
-
-        else:
-            results = {}
-    else:
-        # 异步执行器不可用，回退到同步执行
-        print("[WARN] 异步执行器不可用，使用同步执行节点")
-        return execution_node(state)
-
-    duration = time.time() - start_time
-    print(f"[异步执行节点] 执行结果: {results} (总耗时: {duration:.2f}s)")
-    print(f"[异步执行节点] 相比串行执行，预计节省时间: {len(state['plan']) * 0.5 - duration:.2f}s (估计)")
-
-    # 监控跟踪：异步执行节点
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="execution_node_async",
-                inputs={"plan": state['plan']},
-                outputs={"results": results},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 异步执行节点监控跟踪失败: {e}")
-
-    return {**state, "tool_results": results, "step": "validation"}
-
-
-def validation_node(state: AgentState) -> AgentState:
-    """验证节点：验证答案质量，决定下一步"""
-    import time
-    start_time = time.time()
-
-    print(f"[验证节点] 验证答案质量")
-
-    # 合并所有工具结果
-    preliminary = "\n".join(state["tool_results"].values()) if state["tool_results"] else "无结果"
-
-    # 验证逻辑
-    trust_keywords = ["工单", "受理", "处理中", "已完成", "今天", "年-月-日", "转人工", "天气", "气温", "股票", "价格", "上涨", "下跌",
-                     "图像", "图片", "照片", "OCR", "识别", "文档", "PDF", "Word", "Excel", "文件", "上传", "处理", "内容"]
-    if any(kw in preliminary for kw in trust_keywords):
-        final_answer = preliminary
-        answer_quality = "good"
-    elif len(preliminary) < 5 or "无法确定" in preliminary:
-        final_answer = "抱歉，我无法确定准确答案。建议您转人工客服。"
-        answer_quality = "poor"
-    else:
-        final_answer = preliminary
-        answer_quality = "fair"
-
-    # 判断是否需要转人工
-    needs_human_escalation = (
-        "escalate" in state["plan"] or
-        answer_quality == "poor" or
-        state["iteration"] >= state["max_iterations"]
-    )
-
-    duration = time.time() - start_time
-    print(f"[验证节点] 答案质量: {answer_quality}, 转人工: {needs_human_escalation} (耗时: {duration:.2f}s)")
-
-    # 监控跟踪：验证节点
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="validation_node",
-                inputs={"preliminary": preliminary[:200]},
-                outputs={"final_answer": final_answer[:200], "answer_quality": answer_quality, "needs_human_escalation": needs_human_escalation},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 验证节点监控跟踪失败: {e}")
+        from skill_manager import get_skill_manager
+        skill_manager = get_skill_manager()
+        matching_skills = skill_manager.find_matching_skills(state["user_query"], max_skills=2)
+        if matching_skills:
+            active_skills = [s.name for s in matching_skills]
+            skill_context = "\n\n".join([s.content for s in matching_skills])
+            print(f"[预处理节点] 激活Skill: {active_skills}")
+    except Exception as e:
+        print(f"[预处理节点] Skill匹配失败: {e}")
 
     return {
         **state,
-        "final_answer": final_answer,
-        "answer_quality": answer_quality,
-        "needs_human_escalation": needs_human_escalation,
-        "step": "completed" if not needs_human_escalation else "escalate"
+        "conversation_summary": conversation_summary,
+        "active_skills": active_skills,
+        "skill_context": skill_context,
+        "step": "planning",
+        "tracking_info": tracking_info,
     }
 
 
@@ -1111,177 +765,67 @@ def postprocess_node(state: AgentState) -> AgentState:
     print(f"[后处理节点] 处理最终答案")
 
     memory_manager = get_memory_manager()
+    final_answer = state["final_answer"] or "抱歉，处理您的问题时遇到错误，请稍后再试。"
 
     # 添加助手消息到记忆
-    memory_manager.add_message("assistant", state["final_answer"])
+    memory_manager.add_message("assistant", final_answer)
 
     # 更新用户偏好
-    memory_manager.update_preferences(state["user_query"], state["final_answer"])
+    memory_manager.update_preferences(state["user_query"], final_answer)
 
     # 根据偏好调整最终答案
-    adapted_answer = memory_manager.adapt_response(state["final_answer"])
-
-    # 添加记忆上下文提示（如果相关）
+    adapted_answer = memory_manager.adapt_response(final_answer)
     conversation_summary = memory_manager.generate_summary()
-    if "密码重置" in conversation_summary and "密码" in state["user_query"]:
-        adapted_answer = adapted_answer + " （注意：您之前也询问过密码相关问题）"
-    elif "图像处理" in conversation_summary and ("图片" in state["user_query"] or "图像" in state["user_query"] or "照片" in state["user_query"]):
-        adapted_answer = adapted_answer + " （注意：您之前也处理过图像相关问题）"
-    elif "文档处理" in conversation_summary and ("文档" in state["user_query"] or "pdf" in state["user_query"].lower() or "word" in state["user_query"].lower() or "excel" in state["user_query"].lower()):
-        adapted_answer = adapted_answer + " （注意：您之前也处理过文档相关问题）"
 
-    print(f"[后处理节点] 调整后答案: {adapted_answer}")
+    # 安全打印（避免 LLM 输出中的 emoji 等字符导致 GBK 编码错误）
+    try:
+        print(f"[后处理节点] 调整后答案预览: {adapted_answer[:100]}...")
+    except UnicodeEncodeError:
+        safe_answer = adapted_answer.encode('gbk', errors='replace').decode('gbk', errors='replace')
+        print(f"[后处理节点] 调整后答案预览: {safe_answer[:100]}...")
 
-    # 监控跟踪：后处理节点执行和工作流结束
+    # 监控跟踪
     if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
         duration = time.time() - start_time
-
-        # 跟踪节点执行
         try:
             monitoring_system.track_node_execution(
                 state['tracking_info'],
                 node_name="postprocess_node",
-                inputs={"final_answer": state.get("final_answer", ""), "query": state.get("user_query", "")},
-                outputs={"adapted_answer": adapted_answer, "conversation_summary": conversation_summary},
+                inputs={"final_answer": final_answer[:200], "query": state.get("user_query", "")},
+                outputs={"adapted_answer": adapted_answer[:200]},
                 duration=duration,
                 success=True
             )
         except Exception as e:
             print(f"[WARN] 后处理节点监控跟踪失败: {e}")
-
-        # 跟踪工作流结束（仅在正常结束且不需要人工介入时）
-        if not state.get("needs_human_escalation", False):
-            try:
-                monitoring_system.track_workflow_end(
-                    state['tracking_info'],
-                    outputs={"final_answer": adapted_answer, "conversation_summary": conversation_summary},
-                    success=True
-                )
-            except Exception as e:
-                print(f"[WARN] 工作流结束监控跟踪失败: {e}")
+        try:
+            monitoring_system.track_workflow_end(
+                state['tracking_info'],
+                outputs={"final_answer": adapted_answer[:200]},
+                success=True
+            )
+        except Exception as e:
+            print(f"[WARN] 工作流结束监控跟踪失败: {e}")
 
     return {**state, "final_answer": adapted_answer, "conversation_summary": conversation_summary}
 
 
-def human_escalation_node(state: AgentState) -> AgentState:
-    """人工升级节点：处理需要人工介入的情况"""
-    import time
-    start_time = time.time()
+def create_workflow() -> StateGraph:
+    """创建标准 ReAct Agent 工作流
 
-    print(f"[人工升级节点] 转人工处理")
-
-    memory_manager = get_memory_manager()
-
-    if state["final_answer"] and "转人工" in state["final_answer"]:
-        final_answer = state["final_answer"]
-    else:
-        final_answer = "感谢您的耐心，我已将您的问题转接给人工客服，他们将尽快与您联系（预计5分钟内）。"
-
-    # 根据偏好调整
-    adapted_answer = memory_manager.adapt_response(final_answer)
-
-    # 添加记忆
-    memory_manager.add_message("assistant", adapted_answer)
-
-    # 监控跟踪：人工升级节点执行和工作流结束
-    if MONITORING_AVAILABLE and monitoring_system and 'tracking_info' in state:
-        duration = time.time() - start_time
-
-        # 跟踪节点执行
-        try:
-            monitoring_system.track_node_execution(
-                state['tracking_info'],
-                node_name="human_escalation_node",
-                inputs={"final_answer": state.get("final_answer", ""), "query": state.get("user_query", "")},
-                outputs={"adapted_answer": adapted_answer},
-                duration=duration,
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 人工升级节点监控跟踪失败: {e}")
-
-        # 跟踪工作流结束（人工升级的情况）
-        try:
-            monitoring_system.track_workflow_end(
-                state['tracking_info'],
-                outputs={"final_answer": adapted_answer, "escalation_reason": "human_assistance_required"},
-                success=True
-            )
-        except Exception as e:
-            print(f"[WARN] 人工升级工作流结束监控跟踪失败: {e}")
-
-    return {**state, "final_answer": adapted_answer, "step": "completed"}
-
-
-# ========== 条件路由函数 ==========
-def route_after_validation(state: AgentState) -> Literal["human_escalation", "improvement", "postprocess"]:
-    """验证后的路由决策"""
-    if state["needs_human_escalation"]:
-        return "human_escalation"
-    elif state["answer_quality"] == "poor" and state["iteration"] < state["max_iterations"]:
-        return "improvement"
-    else:
-        return "postprocess"
-
-
-# ========== 图构建 ==========
-def create_workflow(use_async_execution: bool = None) -> StateGraph:
-    """创建带记忆的 LangGraph 工作流
-
-    Args:
-        use_async_execution: 是否使用异步执行节点（默认使用全局配置USE_ASYNC_EXECUTION）
+    工作流结构：
+    preprocess -> agent (ReAct loop: LLM思考 → 工具调用 → 观察 → ... → 最终回答) -> postprocess
     """
     workflow = StateGraph(AgentState)
 
-    # 确定是否使用异步执行
-    if use_async_execution is None:
-        use_async_execution = USE_ASYNC_EXECUTION
-
-    # 选择执行节点
-    if use_async_execution and ASYNC_EXECUTOR_AVAILABLE:
-        print("[INFO] 工作流使用异步执行节点")
-        execution_node_func = execution_node_async
-        execution_node_name = "execution_async"
-    else:
-        if use_async_execution and not ASYNC_EXECUTOR_AVAILABLE:
-            print("[WARN] 异步执行器不可用，使用同步执行节点")
-        else:
-            print("[INFO] 工作流使用同步执行节点")
-        execution_node_func = execution_node
-        execution_node_name = "execution"
-
-    # 添加节点
     workflow.add_node("preprocess", preprocess_node)
-    workflow.add_node("planning", planning_node)
-    workflow.add_node(execution_node_name, execution_node_func)
-    workflow.add_node("validation", validation_node)
+    workflow.add_node("agent", agent_node)
     workflow.add_node("postprocess", postprocess_node)
-    workflow.add_node("human_escalation", human_escalation_node)
 
-    # 设置入口点
     workflow.set_entry_point("preprocess")
-
-    # 添加边（正常流程）
-    workflow.add_edge("preprocess", "planning")
-    workflow.add_edge("planning", execution_node_name)
-    workflow.add_edge(execution_node_name, "validation")
-
-    # 条件边（验证后）
-    workflow.add_conditional_edges(
-        "validation",
-        route_after_validation,
-        {
-            "human_escalation": "human_escalation",
-            "improvement": "planning",  # 重新规划改进
-            "postprocess": "postprocess"
-        }
-    )
-
-    # 后处理到结束
+    workflow.add_edge("preprocess", "agent")
+    workflow.add_edge("agent", "postprocess")
     workflow.add_edge("postprocess", END)
-
-    # 人工升级后到结束
-    workflow.add_edge("human_escalation", END)
 
     return workflow
 
@@ -1298,7 +842,6 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
     Returns:
         Dict containing plan, tool_results, final_answer, workflow info, and memory info
     """
-    # 获取记忆管理器
     memory_manager = get_memory_manager()
 
     # 初始化状态
@@ -1309,66 +852,61 @@ def run_langgraph_agent_with_memory(user_query: str, max_iterations: int = 3) ->
         "plan": None,
         "tool_results": None,
         "final_answer": None,
-        "step": "planning",
+        "raw_context": None,
+        "step": "agent",
         "iteration": 0,
         "max_iterations": max_iterations,
-        "needs_human_escalation": False,
-        "answer_quality": None,
-        "conversation_summary": memory_manager.generate_summary()
+        "conversation_summary": memory_manager.generate_summary(),
+        "tracking_info": None,
+        "active_skills": None,
+        "skill_context": None,
     }
 
-    # 创建图和工作流
     workflow = create_workflow()
 
-    # 创建检查点存储器（支持会话持久化）
+    # 检查点存储器（支持会话持久化）
     memory = MemorySaver()
     app = workflow.compile(checkpointer=memory)
 
-    # 运行工作流
     print(f"\n{'='*60}")
     print(f"开始处理查询: {user_query}")
     print(f"{'='*60}")
 
-    final_state = None
-    for iteration in range(max_iterations):
-        print(f"\n--- 迭代 {iteration + 1} ---")
-
-        # 更新迭代计数
-        if iteration > 0:
-            initial_state["iteration"] = iteration
-
-        # 执行工作流
-        config = {"configurable": {"thread_id": "user_session_1"}}
-        result = app.invoke(initial_state, config)
-        final_state = result
-
-        # 检查是否完成
-        if result["step"] == "completed":
-            break
-
-        # 准备下一次迭代
-        initial_state = result
+    config = {"configurable": {"thread_id": "user_session_1"}}
+    final_state = app.invoke(initial_state, config)
 
     print(f"\n{'='*60}")
     print(f"处理完成")
     print(f"{'='*60}")
 
-    # 获取当前记忆状态
     memory_info = {
         "conversation_length": len(memory_manager.conversation_history),
-        "user_preferences": memory_manager.user_preferences,
+        "user_preferences": dict(memory_manager.user_preferences.get("frequent_topics", set())),
         "recent_topics": list(memory_manager.user_preferences.get("frequent_topics", [])),
         "conversation_summary": memory_manager.generate_summary()
     }
 
+    # 获取 MCP 状态
+    mcp_status = {}
+    try:
+        from mcp_client import get_mcp_manager
+        mcp_mgr = get_mcp_manager()
+        if mcp_mgr:
+            mcp_status = mcp_mgr.get_status()
+    except Exception:
+        pass
+
     return {
-        "plan": final_state["plan"] if final_state else None,
-        "tool_results": final_state["tool_results"] if final_state else None,
-        "final_answer": final_state["final_answer"] if final_state else None,
+        "plan": final_state.get("plan") if final_state else None,
+        "tool_results": final_state.get("tool_results") if final_state else None,
+        "final_answer": final_state.get("final_answer") if final_state else None,
+        "raw_context": final_state.get("raw_context", "") if final_state else "",
+        "active_skills": final_state.get("active_skills", []) if final_state else [],
+        "mcp_status": mcp_status,
         "workflow_info": {
-            "iterations": final_state["iteration"] + 1 if final_state else 0,
-            "final_step": final_state["step"] if final_state else None,
-            "answer_quality": final_state["answer_quality"] if final_state else None
+            "iterations": 1,
+            "final_step": final_state.get("step") if final_state else None,
+            "answer_quality": "N/A"
         },
         "memory_info": memory_info
     }

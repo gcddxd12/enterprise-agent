@@ -8,6 +8,8 @@ dashscope
 python-dotenv
 pytest
 streamlit
+pyyaml>=6.0
+mcp>=1.0
 
 # 监控和评估依赖
 langsmith>=0.1.0  # LangSmith SDK for tracing and monitoring
