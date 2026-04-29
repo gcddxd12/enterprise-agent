@@ -7,7 +7,27 @@ import sys
 import os
 
 # 确保项目根目录在 Python 路径中（CI 环境兼容）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+
+# CI 诊断：打印路径信息（便于排查）
+print(f"[CI-DEBUG] Project root: {_PROJECT_ROOT}", flush=True)
+print(f"[CI-DEBUG] sys.path[0]: {sys.path[0]}", flush=True)
+print(f"[CI-DEBUG] skill_manager.py exists: {os.path.exists(os.path.join(_PROJECT_ROOT, 'skill_manager.py'))}", flush=True)
+
+
+
+# 诊断辅助：验证 skill_manager 是否可导入
+import importlib.util
+_skill_spec = importlib.util.find_spec("skill_manager")
+if _skill_spec is None:
+    raise RuntimeError(
+        f"CRITICAL: skill_manager module not found in Python path.\n"
+        f"  sys.path[0]: {sys.path[0]}\n"
+        f"  Project root: {_PROJECT_ROOT}\n"
+        f"  skill_manager.py exists: {os.path.exists(os.path.join(_PROJECT_ROOT, 'skill_manager.py'))}\n"
+        f"  Full sys.path: {sys.path[:5]}"
+    )
 
 
 class TestSkillManager:
