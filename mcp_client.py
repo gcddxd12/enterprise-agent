@@ -18,6 +18,9 @@ import yaml
 from pydantic import create_model, Field
 
 
+from resilience import get_logger
+logger = get_logger('cmcc_agent.mcp')
+
 @dataclass
 class MCPServerConfig:
     name: str
@@ -62,26 +65,26 @@ class MCPClientManager:
                     enabled=s.get("enabled", True),
                     description=s.get("description", ""),
                 )
-            print(f"[MCPClient] 加载了 {len(self.servers)} 个 MCP Server 配置")
+            logger.info(f"[MCPClient] 加载了 {len(self.servers)} 个 MCP Server 配置")
         except FileNotFoundError:
-            print(f"[MCPClient] 配置文件不存在: {self.config_path}")
+            logger.info(f"[MCPClient] 配置文件不存在: {self.config_path}")
         except Exception as e:
-            print(f"[MCPClient] 加载配置失败: {e}")
+            logger.error(f"[MCPClient] 加载配置失败: {e}")
 
     def connect_all(self) -> int:
         """连接所有启用的 MCP Server，发现并注册工具。返回工具总数。"""
         total = 0
         for key, config in self.servers.items():
             if not config.enabled:
-                print(f"[MCPClient] 跳过已禁用的 Server: {config.name}")
+                logger.info(f"[MCPClient] 跳过已禁用的 Server: {config.name}")
                 continue
             try:
                 count = self._connect_server(key, config)
                 total += count
-                print(f"[MCPClient] {config.name}: 发现 {count} 个工具")
+                logger.info(f"[MCPClient] {config.name}: 发现 {count} 个工具")
             except Exception as e:
-                print(f"[MCPClient] 连接 {config.name} 失败: {e}")
-        print(f"[MCPClient] 总计发现 {total} 个 MCP 工具")
+                logger.error(f"[MCPClient] 连接 {config.name} 失败: {e}")
+        logger.info(f"[MCPClient] 总计发现 {total} 个 MCP 工具")
         return total
 
     def _connect_server(self, key: str, config: MCPServerConfig) -> int:
@@ -116,7 +119,7 @@ class MCPClientManager:
             if "error" in init_resp:
                 raise RuntimeError(f"初始化失败: {init_resp['error']}")
             server_info = init_resp.get("result", {}).get("serverInfo", {})
-            print(f"[MCPClient] {config.name} 已连接 ({server_info.get('name', 'unknown')} v{server_info.get('version', '?')})")
+            logger.info(f"[MCPClient] {config.name} 已连接 ({server_info.get('name', 'unknown')} v{server_info.get('version', '?')})")
 
             # 2. 发送 initialized 通知
             self._send_notification(key, "notifications/initialized")
@@ -276,7 +279,7 @@ class MCPClientManager:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-            print(f"[MCPClient] 已断开: {key}")
+            logger.info(f"[MCPClient] 已断开: {key}")
 
     def get_status(self) -> Dict:
         """返回 MCP 连接状态摘要"""
@@ -357,7 +360,7 @@ def init_mcp_tools(config_path: str = "./mcp_servers.yaml", force: bool = False)
     """初始化 MCP 连接并返回 LangChain 工具列表"""
     global _mcp_manager
     if _mcp_manager is not None and not force:
-        print("[MCP] MCPClientManager 已初始化，跳过")
+        logger.info("[MCP] MCPClientManager 已初始化，跳过")
         return []
 
     if force and _mcp_manager is not None:
@@ -369,18 +372,18 @@ def init_mcp_tools(config_path: str = "./mcp_servers.yaml", force: bool = False)
         count = _mcp_manager.connect_all()
 
         if count == 0:
-            print("[MCP] 未发现任何 MCP 工具（可能所有 Server 都被禁用或连接失败）")
+            logger.error("[MCP] 未发现任何 MCP 工具（可能所有 Server 都被禁用或连接失败）")
             return []
 
         tools = []
         for info in _mcp_manager.list_tools():
             lt = create_mcp_langchain_tool(info, _mcp_manager)
             tools.append(lt)
-            print(f"[MCP] 已注册工具: {info.name} (来自 {info.server_name})")
+            logger.info(f"[MCP] 已注册工具: {info.name} (来自 {info.server_name})")
 
         return tools
     except Exception as e:
-        print(f"[MCP] 初始化失败: {e}")
+        logger.error(f"[MCP] 初始化失败: {e}")
         import traceback
         traceback.print_exc()
         return []

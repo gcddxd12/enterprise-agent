@@ -27,6 +27,9 @@ from typing import List, Dict, Any, Callable
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+from resilience import get_logger
+logger = get_logger('cmcc_agent.rag')
+
 # LangChain相关导入
 try:
     # 注意：LangChain 1.2.15中，EnsembleRetriever和ContextualCompressionRetriever不可用
@@ -36,7 +39,7 @@ try:
 
     LANGCHAIN_AVAILABLE = True
 except ImportError as e:
-    print(f"警告：LangChain导入失败，部分高级功能不可用: {e}")
+    logger.error(f"警告：LangChain导入失败，部分高级功能不可用: {e}")
     LANGCHAIN_AVAILABLE = False
 
 # 加载环境变量
@@ -100,9 +103,9 @@ class VectorCache:
                             "timestamp": entry.get("timestamp", ""),
                             "access_count": entry.get("access_count", 0)
                         }
-                print(f"向量缓存已加载，条目数: {len(self.embedding_cache)} 个嵌入，{len(self.result_cache)} 个结果")
+                logger.info(f"向量缓存已加载，条目数: {len(self.embedding_cache)} 个嵌入，{len(self.result_cache)} 个结果")
             except Exception as e:
-                print(f"加载缓存失败: {e}")
+                logger.error(f"加载缓存失败: {e}")
 
     def _save_cache(self):
         """保存缓存到文件（JSON 格式）"""
@@ -131,7 +134,7 @@ class VectorCache:
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"保存缓存失败: {e}")
+            logger.error(f"保存缓存失败: {e}")
 
     def _get_cache_key(self, text: str) -> str:
         """生成缓存键"""
@@ -267,7 +270,7 @@ class VectorCache:
             "last_reset": datetime.now().isoformat()
         }
         self._save_cache()
-        print("向量缓存已清空")
+        logger.info("向量缓存已清空")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""
@@ -298,13 +301,13 @@ class VectorCache:
     def print_stats(self):
         """打印缓存统计信息"""
         stats = self.get_stats()
-        print("=== 向量缓存统计 ===")
-        print(f"嵌入缓存大小: {stats['embedding_cache_size']} 个条目")
-        print(f"结果缓存大小: {stats['result_cache_size']} 个条目")
-        print(f"嵌入缓存命中率: {stats['embedding_hit_rate']:.1%} ({stats['embedding_hits']}/{stats['embedding_hits']+stats['embedding_misses']})")
-        print(f"结果缓存命中率: {stats['result_hit_rate']:.1%} ({stats['result_hits']}/{stats['result_hits']+stats['result_misses']})")
-        print(f"估计节省时间: {stats['total_saved_time_seconds']:.2f} 秒")
-        print(f"统计重置时间: {stats['last_reset']}")
+        logger.info("=== 向量缓存统计 ===")
+        logger.info(f"嵌入缓存大小: {stats['embedding_cache_size']} 个条目")
+        logger.info(f"结果缓存大小: {stats['result_cache_size']} 个条目")
+        logger.info(f"嵌入缓存命中率: {stats['embedding_hit_rate']:.1%} ({stats['embedding_hits']}/{stats['embedding_hits']+stats['embedding_misses']})")
+        logger.info(f"结果缓存命中率: {stats['result_hit_rate']:.1%} ({stats['result_hits']}/{stats['result_hits']+stats['result_misses']})")
+        logger.info(f"估计节省时间: {stats['total_saved_time_seconds']:.2f} 秒")
+        logger.info(f"统计重置时间: {stats['last_reset']}")
 
 # ========== 查询扩展器 ==========
 class QueryExpander:
@@ -425,7 +428,7 @@ class QueryExpander:
             return variants[:max_variants]
 
         except Exception as e:
-            print(f"查询扩展失败，使用模拟模式: {e}")
+            logger.error(f"查询扩展失败，使用模拟模式: {e}")
             return self._mock_expand_query(query, max_variants)
 
     def _mock_expand_query(self, query: str, max_variants: int) -> List[str]:
@@ -537,7 +540,7 @@ class AdvancedRAGRetriever:
         self.vector_weight = 0.7
         self.keyword_weight = 0.3
 
-        print(f"高级RAG检索器已初始化: 向量检索器={vector_retriever is not None}, "
+        logger.info(f"高级RAG检索器已初始化: 向量检索器={vector_retriever is not None}, "
               f"关键词检索器={keyword_retriever is not None}, 查询扩展={query_expander is not None}")
 
     def retrieve(self, query: str, k: int = 5, expand_queries: bool = True) -> List[Document]:
@@ -555,7 +558,7 @@ class AdvancedRAGRetriever:
         # 查询扩展
         if expand_queries:
             expanded_queries = self.query_expander.expand_query(query, max_variants=3)
-            print(f"查询扩展: 原始='{query}'，扩展变体={expanded_queries}")
+            logger.info(f"查询扩展: 原始='{query}'，扩展变体={expanded_queries}")
         else:
             expanded_queries = [query]
 
@@ -594,7 +597,7 @@ class AdvancedRAGRetriever:
 
                 results.extend(vector_results)
             except Exception as e:
-                print(f"向量检索失败: {e}")
+                logger.error(f"向量检索失败: {e}")
 
         # 关键词检索
         if self.keyword_retriever:
@@ -608,7 +611,7 @@ class AdvancedRAGRetriever:
 
                 results.extend(keyword_results)
             except Exception as e:
-                print(f"关键词检索失败: {e}")
+                logger.error(f"关键词检索失败: {e}")
 
         return results
 
@@ -730,7 +733,7 @@ def create_advanced_rag_system(
                 search_kwargs={"k": config.get("vector_k", 10)}
             )
         except Exception as e:
-            print(f"创建向量检索器失败: {e}")
+            logger.error(f"创建向量检索器失败: {e}")
 
     # 关键词检索器（BM25）
     keyword_retriever = None
@@ -739,7 +742,7 @@ def create_advanced_rag_system(
             keyword_retriever = BM25Retriever.from_documents(documents)
             keyword_retriever.k = config.get("bm25_k", 10)
         except Exception as e:
-            print(f"创建BM25检索器失败: {e}")
+            logger.error(f"创建BM25检索器失败: {e}")
 
     # 查询扩展器
     query_expander = QueryExpander(llm=llm, use_mock=use_mock)
@@ -758,7 +761,7 @@ def create_advanced_rag_system(
 # ========== 测试函数 ==========
 def test_advanced_rag():
     """测试高级RAG系统"""
-    print("=== 测试高级RAG系统 ===")
+    logger.info("=== 测试高级RAG系统 ===")
 
     try:
         # 创建模拟文档
@@ -793,27 +796,27 @@ def test_advanced_rag():
         ]
 
         for query in test_queries:
-            print(f"\n测试查询: '{query}'")
+            logger.info(f"\n测试查询: '{query}'")
             results = retriever.retrieve(query, k=2)
 
             for i, doc in enumerate(results):
-                print(f"  结果 {i+1}: {doc.page_content[:60]}...")
-                print(f"    来源: {doc.metadata.get('source', '未知')}")
-                print(f"    分数: {doc.metadata.get('final_score', 0):.3f}")
+                logger.info(f"  结果 {i+1}: {doc.page_content[:60]}...")
+                logger.info(f"    来源: {doc.metadata.get('source', '未知')}")
+                logger.info(f"    分数: {doc.metadata.get('final_score', 0):.3f}")
 
-        print("\n[SUCCESS] 高级RAG系统测试完成")
+        logger.info("\n[SUCCESS] 高级RAG系统测试完成")
         return True
 
     except Exception as e:
-        print(f"[FAILED] 测试失败: {e}")
+        logger.error(f"[FAILED] 测试失败: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 # ========== 主入口 ==========
 if __name__ == "__main__":
-    print("高级RAG系统模块")
-    print("功能: 混合检索、查询扩展、重排序、向量缓存")
+    logger.info("高级RAG系统模块")
+    logger.info("功能: 混合检索、查询扩展、重排序、向量缓存")
 
     # 运行测试
     test_advanced_rag()
