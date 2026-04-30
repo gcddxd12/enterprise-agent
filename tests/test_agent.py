@@ -130,7 +130,7 @@ class TestToolFunctions:
         """验证空工单号被拒绝"""
         from langgraph_agent_with_memory import query_ticket_status
         result = query_ticket_status.invoke({"ticket_id": ""})
-        assert "错误" in result
+        assert "有效的工单号" in result or "错误" in result
 
     def test_query_ticket_status_known(self):
         """验证已知工单查询"""

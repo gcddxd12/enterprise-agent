@@ -423,9 +423,11 @@ def knowledge_search(query: str) -> str:
 @tool
 def query_ticket_status(ticket_id: str) -> str:
     """查询工单处理状态。输入工单号（如TK-123456），返回当前处理进度。"""
-    if not ticket_id or not isinstance(ticket_id, str) or not ticket_id.strip():
-        return "错误：请提供有效的工单号（如 TK-123456）"
-    ticket_id = ticket_id.strip()
+    from guardrails import validate_ticket_id
+    ok, result = validate_ticket_id(ticket_id)
+    if not ok:
+        return result
+    ticket_id = result
 
     try:
         from repositories import get_ticket_repo
@@ -704,7 +706,49 @@ def agent_node(state: AgentState) -> AgentState:
 
 # ========== LangGraph 节点函数 ==========
 def preprocess_node(state: AgentState) -> AgentState:
-    """预处理节点：处理用户输入，更新记忆"""
+    """预处理节点：安全护栏 + 处理用户输入 + 更新记忆"""
+    from guardrails import (
+        content_safety_check,
+        sanitize_input,
+        validate_query_length,
+        check_rate_limit,
+    )
+
+    query = state["user_query"]
+
+    # 频率限制检查
+    session_id = state.get("tracking_info", {}).get("session_id", "default")
+    if not check_rate_limit(session_id):
+        logger.warning(f"频率限制触发: session={session_id}")
+        return {
+            **state,
+            "final_answer": "请求过于频繁，请稍后再试。如需紧急帮助请拨打10086。",
+            "step": "completed",
+        }
+
+    # 内容安全检查
+    is_safe, reason = content_safety_check(query)
+    if not is_safe:
+        logger.warning(f"内容安全检查拦截: {reason}")
+        return {
+            **state,
+            "final_answer": "您的问题涉及不适当内容，无法处理。如需帮助请联系10086人工客服。",
+            "step": "completed",
+        }
+
+    # 输入长度检查
+    is_valid, msg = validate_query_length(query, max_length=2000)
+    if not is_valid:
+        return {
+            **state,
+            "final_answer": msg,
+            "step": "completed",
+        }
+
+    # 输入清洗
+    clean_query = sanitize_input(query)
+    state = {**state, "user_query": clean_query}
+
     logger.info(f"处理查询: {state['user_query']}")
 
     memory_manager = get_memory_manager()
